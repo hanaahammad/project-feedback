@@ -109,14 +109,34 @@ Constraints:
 - Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 7. Feedback submission form (Start / Stop / Continue)
-Goal: Let a team member submit feedback cards for an open cycle.
-Description: Build a form with three sections — Start, Stop, Continue — where a member can add multiple short cards. Submitted cards are saved against the current cycle and the submitting user — this is where `Card` gets its `author` link, deferred by #2 until a `User` existed.
-Depends on: #2 (Core data model), #3 (User authentication), #6 (Create a feedback cycle and invite the team)
+Goal: A logged-in member of a project can submit multiple feedback cards -- each tagged Start, Stop, or Continue -- against an open cycle of that project, and each card is persisted with a link to the cycle and to the member who submitted it.
 Acceptance Criteria:
-- A member can add multiple cards under each of Start, Stop, and Continue
-- Submitted cards are persisted with a link to the cycle and the author
-- Submitting to a closed cycle is rejected
-- Only a member of the project can submit cards to one of its cycles
+- [ ] A member of the project (`team_member` or `facilitator`) can submit a feedback card to an open cycle (e.g. `POST /projects/{project_id}/cycles/{cycle_id}/cards`) with `category` (`start`, `stop`, or `continue`) and `text`; the response is `201` and includes the card's `id`, `cycle_id`, `category`, and `text`
+- [ ] A member can submit more than one card under the same category in the same cycle -- e.g. two separate `start` submissions both persist as distinct rows
+- [ ] A member can submit cards under all three categories (`start`, `stop`, `continue`) in the same cycle
+- [ ] Each submitted card is persisted with its `cycle_id` set to the cycle it was submitted to
+- [ ] Each submitted card is persisted with a new `author_id` foreign key referencing the submitting user -- a column that does not yet exist on `feedback_cards` and that this task adds via a migration; cards submitted by two different members of the same cycle are attributable to their correct, distinct authors
+- [ ] A request with a `category` outside `start`/`stop`/`continue` is rejected with `422` and no card is created
+- [ ] A request with blank or whitespace-only `text` is rejected with `422` and no card is created
+- [ ] A request to submit a card to a cycle whose `status` is `revealed` is rejected with `409` and no card is created
+- [ ] A request to submit a card to a cycle whose `status` is `closed` is rejected with `409` and no card is created
+- [ ] A request to submit a card without a valid auth token is rejected with `401`
+- [ ] A request to submit a card from an authenticated user who has no `ProjectMembership` on that project at all is rejected with `403`, not `500`
+- [ ] A request naming a `cycle_id` that exists but belongs to a different project than the `project_id` in the path is rejected with `404`
+- [ ] A request naming a `cycle_id` that does not exist at all is rejected with `404`
+- [ ] `uv run pytest` passes, including new tests covering the cases above
+Out of scope:
+- Marking a card anonymous at submission time -- the `is_anonymous` column already exists on `FeedbackCard` (from #2) but this task's request schema does not expose it, so every card created here has `is_anonymous = false`; adding the checkbox and hiding the author everywhere (including from the facilitator) is #8's job
+- Viewing or listing submitted cards, before or after reveal -- that's #9 (private pre-reveal view) and #10 (facilitator reveal)'s job, both of which depend on this task existing
+- Editing or deleting a previously submitted card -- #9 is where editing one's own pre-reveal cards is introduced
+- Any clustering, grouping, or assignment of a card to a `Cluster` -- that's #11's job; cards created here always have `cluster_id = null`
+- A frontend UI/form -- consistent with every other task in this backlog so far (#4-#6), this task only builds the API endpoint(s); no template/static layer exists in the project and nothing later in the plan calls for one, so no follow-up issue is filed for it
+Constraints:
+- `FeedbackCard`, `FeedbackCycle`, and `ProjectMembership` already exist in `app/models.py` (from #2 and #4); this task adds the missing `author_id: Mapped[int] = mapped_column(ForeignKey("users.id"))` column to `FeedbackCard` (plus the corresponding `author`/`cards` relationship pair with `User`), generated via `uv run alembic revision --autogenerate -m "..."`, matching the existing files in `migrations/versions/` (`8489561c7db3_add_roles_and_project_memberships.py` is the most recent)
+- No dependency in `app/security.py` currently checks for "any project membership regardless of role" -- `require_role(role_name)` only matches one named role. Add a reusable dependency (e.g. `require_project_member`) next to `require_role`, built the same way (depends on `get_current_user`, resolves the `ProjectMembership` for the `project_id` path parameter, `403` if none exists) but without a role-name check, so members of either role can submit cards
+- New route(s) belong in a new `app/cards.py` router (or extend an existing cycles router -- implementer's choice, matching the existing router-per-resource pattern), included from `app/main.py` the same way `app/auth.py`'s router is
+- Follow the existing FastAPI/Pydantic pattern in `app/auth.py` and `app/projects.py`: Pydantic request/response models, `response_model=...`, `Depends(get_db)`, `HTTPException(status_code=..., detail=...)`
+- Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 8. Anonymous submission handling
 Goal: Let contributors mark individual cards as anonymous, and enforce it everywhere.
