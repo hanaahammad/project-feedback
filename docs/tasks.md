@@ -343,13 +343,43 @@ Constraints:
 - Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 14. Reveal vote results after voting closes
-Goal: Show vote totals only once voting is complete.
-Description: Hide individual and running vote totals while voting is open, and reveal the final tally (ranked by votes) once every participant has voted or the facilitator manually closes voting. This produces the prioritized discussion agenda referenced elsewhere in the plan.
-Depends on: #4 (Configurable roles and permissions), #13 (Voting on discussion topics)
+Goal: While a revealed cycle's voting stays open, no one can see individual or running vote totals; once voting closes -- either because every project member has cast at least one non-empty ballot, or because the facilitator manually closes it -- any project member can view the final tally, ranked by total votes per cluster, which becomes the prioritized agenda #15 works from.
 Acceptance Criteria:
-- Vote totals are not visible to participants while voting is open
-- Totals become visible once all participants have voted, or the facilitator closes voting
-- The results view ranks clusters by total votes
+- [ ] `GET /projects/{project_id}/cycles/{cycle_id}/votes/results` on a cycle whose `status` is `open` is rejected with `409` -- no clusters or votes can exist before reveal, mirroring #11's and #13's gating
+- [ ] On a `revealed` cycle where `voting_closed` is `False` and at least one project member (of those holding a `ProjectMembership` on the project) has cast no non-empty ballot in this cycle, `GET .../votes/results` is rejected with `409` and the response body contains no cluster or vote data (e.g. `{"detail": "voting results are not available yet"}`)
+- [ ] Once every project member with a `ProjectMembership` on the project has cast at least one `Vote` row on a cluster in this cycle, `GET .../votes/results` returns `200` with no explicit close action taken -- this is evaluated fresh on each call, not cached or persisted
+- [ ] A test proves a participant who submits an empty `cluster_ids: []` ballot (a deliberate abstention, allowed by #13) leaves zero `Vote` rows and is NOT counted as having voted for the everyone-voted check -- if that participant is the only one who hasn't cast a non-empty ballot, `GET .../votes/results` stays `409` until the facilitator manually closes voting
+- [ ] A facilitator can close voting early on a `revealed` cycle (`POST /projects/{project_id}/cycles/{cycle_id}/close-voting`), even if not every participant has voted; the response is `200` and includes `cycle_id`, `project_id`, and `voting_closed: true`
+- [ ] After `close-voting`, `GET .../votes/results` returns `200` regardless of how many participants voted, including if zero participants voted
+- [ ] A request to `close-voting` from a user who holds only the `team_member` role on that project is rejected with `403`, via `require_role("facilitator")`
+- [ ] A request to `close-voting` on a cycle whose `status` is `open` or `closed` is rejected with `409`, and `voting_closed` is left unchanged
+- [ ] A second call to `close-voting` on a cycle where `voting_closed` is already `True` is rejected with `409`, and `voting_closed` stays `True`
+- [ ] Once results are available (via either path), `GET .../votes/results` returns clusters ranked by total vote count descending; a test with clusters holding 3, 1, and 0 votes confirms the response order is `[3-vote cluster, 1-vote cluster, 0-vote cluster]`
+- [ ] Clusters with zero votes are included in the results (not omitted), each with `vote_count: 0`
+- [ ] Two clusters with an equal vote count are ordered deterministically by ascending `cluster_id`; a test proves this tie-break
+- [ ] Each entry in the results response includes `cluster_id`, `name`, and `vote_count`
+- [ ] `GET .../votes/results` remains available (subject to the same `voting_closed`/everyone-voted gate) once the cycle's own `status` becomes `closed` -- consistent with #10's and #11's read endpoints staying accessible after the cycle itself closes
+- [ ] `close-voting` and `votes/results` both reject a `cycle_id` that does not exist, or that belongs to a different `project_id` than the one in the path, with `404`
+- [ ] Both endpoints reject a request without a valid auth token with `401`
+- [ ] Both endpoints reject a request from an authenticated user with no `ProjectMembership` on that project at all with `403`, not `500`
+- [ ] `uv run pytest` passes, including the new tests
+Out of scope:
+- The vote-ranked discussion agenda itself, and marking topics Discussed/Skipped/Deferred -- that's #15's job, which consumes this task's ranked results but owns its own view and status transitions
+- Preventing further vote submissions via #13's `POST .../votes` once voting has closed -- this task does not add a check to that endpoint, to avoid modifying code #13 owns (see Constraints); a vote cast after closing is reflected the next time `/votes/results` is called, since results are computed live rather than snapshotted at close time. No follow-up filed since nothing else in docs/tasks.md's plan requires the tally to be frozen once closed
+- Surfacing in the results response *why* voting is available (manually closed vs. everyone voted) -- no follow-up filed since nothing in the plan calls for that distinction
+- Reopening voting once closed -- no un-close endpoint is added; nothing in the plan calls for it, so no follow-up filed
+- A frontend UI for the results view -- consistent with #4-#13, no template/static layer exists in the project and nothing later in the plan calls for one, so no follow-up filed
+- Real-time push/notification when results become available -- nothing in the plan calls for it at this stage, so no follow-up filed
+Constraints:
+- Depends on #13 (Voting on discussion topics) being merged: `Vote.participant_id`, the `app/votes.py` router, and `require_project_member` already exist and must be reused, not re-derived
+- Depends on #4 (Configurable roles and permissions) being merged: use the existing `require_role("facilitator")` dependency for `close-voting`
+- Add a new `voting_closed: Mapped[bool] = mapped_column(Boolean, default=False)` column to `FeedbackCycle` in `app/models.py`. This is deliberately separate from `CycleStatus` (`open`/`revealed`/`closed`): voting has its own closed/open sub-state that lives inside the `revealed` cycle phase, distinct from the cycle-level transition to `closed` that #15 owns. Add it via a new Alembic migration (`add_column`, default `false`), following the same `batch_alter_table`/`add_column` pattern as the most recent prior migration at implementation time (e.g. #13's `Vote.participant_id` migration)
+- "Everyone has voted" is computed lazily, at read time, inside `GET .../votes/results`: count of distinct `ProjectMembership.user_id` for the project, compared against the count of distinct `Vote.participant_id` values with at least one `Vote` row on a cluster belonging to this cycle. This check is deliberately NOT added to #13's `POST .../votes` endpoint (which would otherwise need to auto-close voting on submission) -- computing it lazily here avoids modifying code #13 owns, at the cost of the everyone-voted state only being reflected on the next call to `votes/results` rather than the instant the last vote is cast
+- A participant who casts an empty `cluster_ids: []` ballot (a deliberate abstention, allowed by #13) leaves zero `Vote` rows and is therefore indistinguishable, for the everyone-voted check, from a participant who has not voted at all -- voting will never auto-close in a group where any member intentionally abstains this way; the facilitator's manual `close-voting` is the only way to proceed in that case. This is an accepted limitation of #13's existing data model (no separate "has submitted" marker), not something this task changes
+- If a facilitator adds a new project member (#6) after every existing member has voted, the everyone-voted check re-evaluates against the new membership count on the next call and can flip `votes/results` back to `409` until the new member votes or the facilitator closes voting manually -- accepted as a consequence of the lazy, uncached computation
+- Add both new routes (`POST .../close-voting`, `GET .../votes/results`) to the existing `app/votes.py` router (from #13), following the same Pydantic request/response, `Depends(get_db)`, `HTTPException(status_code=..., detail=...)` pattern as #13's routes; use `Depends(require_role("facilitator"))` for `close-voting` and `Depends(require_project_member)` for `votes/results`
+- Gating mirrors the `409` pattern already used by #7/#10/#11/#13: `cycle.status == CycleStatus.OPEN` rejects both new endpoints with `409`; a `closed` cycle rejects `close-voting` with `409` (nothing left to close) but `votes/results` stays readable on `closed`, consistent with #10's and #11's read endpoints remaining available post-close
+- Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 15. Discussion stage with topic status
 Goal: Let the facilitator move through the vote-ranked topics during the meeting, and close the cycle when the meeting ends.
