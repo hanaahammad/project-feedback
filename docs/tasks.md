@@ -30,16 +30,29 @@ Acceptance Criteria:
 - A reusable "current user" dependency/function exists that other routes can depend on — #4's permission check is built on top of it
 
 ## 4. Configurable roles and permissions
-Goal: Support project-level roles instead of hard-coded ones.
-Description: Add a `ProjectMembership` entity linking a user (task 3) to a project (task 2) with a role. Add a reusable permission-check mechanism (a FastAPI dependency) that any route can use to require a role. For the MVP, only seed the two roles from the plan — Team Member and Facilitator — but store the role as data on the membership row, not as hard-coded branching in application code, so a future custom role doesn't require a code change.
-Depends on: #2 (Core data model), #3 (User authentication)
-Out of scope: any UI or endpoint for creating or editing custom roles — the plan only calls for the two MVP roles; this task is about the schema and permission-check mechanism being role-name-agnostic, not about exposing role management to users.
+Goal: A route can require a specific role (e.g. "facilitator") on a specific project by depending on a reusable FastAPI dependency, with roles stored as data rather than hard-coded in application logic.
 Acceptance Criteria:
-- A `ProjectMembership` (or equivalent) row links a user, a project, and a role
-- Team Member and Facilitator exist as seeded data, not Python constants compared with if/elif
-- A reusable permission-check dependency exists (e.g. `require_role("facilitator")`) that can be applied to any route
-- Since no protected route exists yet, add one minimal example route guarded by the dependency to prove it end-to-end
-- A test shows that route returns 403 for a member without the required role and 200 for one with it
+- [ ] A `Role` table (or equivalent) exists with two seeded rows: `team_member` and `facilitator` — querying the table after migrations run shows both rows, without reading any Python source
+- [ ] A `ProjectMembership` table exists with a `user_id` (FK to `users`), a `project_id` (FK to `projects`), and a role reference (FK to the seeded role data) — there is a unique constraint so one user has at most one row per project
+- [ ] A new Alembic migration creates the `roles` and `project_memberships` tables and inserts the two seeded role rows; running `uv run alembic upgrade head` against a fresh database leaves exactly those two role rows present
+- [ ] A `require_role(role_name)` FastAPI dependency exists in `app/security.py`, built on top of `get_current_user`, that resolves the caller's `ProjectMembership` for a project id (e.g. taken from a path parameter) and checks its role — there is no `if role == "facilitator"` (or similar) branching anywhere else in the codebase
+- [ ] One example route is added (e.g. `GET /projects/{project_id}/facilitator-ping`) guarded by `require_role("facilitator")`, solely to prove the dependency end-to-end — it is scaffolding for this task, not a product feature
+- [ ] A test calls the example route as a user with a `team_member` membership on that project and gets `403`
+- [ ] A test calls the example route as a user with a `facilitator` membership on that project and gets `200`
+- [ ] A test calls the example route with no auth token (or an invalid one) and gets `401`, showing `get_current_user`'s existing check still runs before the role check
+- [ ] A test calls the example route as a user who is authenticated but has no `ProjectMembership` row at all on that project and gets `403`, not a `500`
+- [ ] `uv run pytest` passes, including the new tests
+Out of scope:
+- Any UI or endpoint for creating, renaming, or assigning custom roles — the MVP only ever needs the two seeded roles (`team_member`, `facilitator`); this plan doesn't call for role management as a feature anywhere, so no follow-up issue is filed for it
+- Wiring `require_role` into real feature routes — facilitator-only cycle creation (#6), reveal (#10), discussion status changes (#15), meeting uploads (#18), and draft confirmation (#21) each apply the dependency when they build their own routes; those routes don't exist yet
+- The project-creation flow and "creator becomes Facilitator" behavior — that's #5's job; this task only needs a `Project` row to exist for its own tests
+Constraints:
+- Builds on #2 (Core data model) and #3 (User authentication), both merged: the `User` model and `get_current_user` dependency already exist and should not be re-implemented
+- Add `Role` and `ProjectMembership` as new classes in `app/models.py`, following the existing SQLAlchemy 2.0 declarative style (`Mapped[...]` / `mapped_column`, `relationship(back_populates=...)`) used by `User`, `Project`, etc.
+- Add the permission-check dependency to `app/security.py`, next to `get_current_user`, and have it depend on `get_current_user` rather than re-parsing the auth token
+- Generate the schema change with `uv run alembic revision --autogenerate -m "..."`, matching the existing files in `migrations/versions/` (`a1e32fb74dd2_add_users_and_auth_tokens.py` is the most recent), and seed the two role rows inside that same migration's `upgrade()`
+- Put the example route in a new small router (e.g. `app/example_protected.py`) included from `app/main.py` the same way `app/auth.py`'s router is, so it can be deleted later without touching real feature code
+- Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py` (`Base.metadata.create_all` on a `StaticPool` `sqlite:///:memory:` engine, `app.dependency_overrides[get_db]`)
 
 ## 5. Create and view a project
 Goal: Let a user create a project and see its page.
