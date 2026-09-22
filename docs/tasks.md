@@ -311,14 +311,36 @@ Constraints:
 - Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`, stubbing/monkeypatching the AI function as described above
 
 ## 13. Voting on discussion topics
-Goal: Let each team member distribute 3 votes across clusters.
-Description: Add a voting UI where each participant gets exactly 3 votes to allocate across clusters, including the ability to put more than one vote on the same cluster. Store each vote so results can be tallied later.
-Depends on: #2 (Core data model), #3 (User authentication), #11 (Manual clustering board)
+Goal: Each project member gets exactly 3 votes per revealed cycle to allocate freely across that cycle's #11 clusters, including stacking more than one vote on the same cluster; a participant can resubmit their allocation at any time while the cycle stays revealed, and each submission atomically replaces their previous one for that cycle.
 Acceptance Criteria:
-- Each participant has exactly 3 votes to allocate per cycle
-- A participant can place more than one vote on the same cluster
-- A participant cannot cast more than 3 total votes
-- Votes are persisted per participant per cluster
+- [ ] A project member can cast votes on a revealed cycle in a single request (`POST /projects/{project_id}/cycles/{cycle_id}/votes`) with body `{"cluster_ids": [<id>, <id>, ...]}`, where `cluster_ids` is a list of 0 to 3 cluster ids belonging to that cycle and repeats are allowed (stacking multiple votes on the same cluster); the response is `200` with `{"cycle_id": ..., "cluster_ids": [...]}` reflecting exactly the submitted list, as a multiset -- order is not guaranteed
+- [ ] Submitting `cluster_ids` with more than 3 entries (e.g. 4, including repeats) is rejected with `422`, and no `Vote` rows are created or changed
+- [ ] Submitting an empty `cluster_ids` list (`[]`) succeeds with `200` and clears the participant's votes for that cycle (see the replace behavior below) -- a participant is not required to use all 3 votes, or to have voted before, to submit an empty list
+- [ ] A `cluster_ids` entry that does not exist, or that belongs to a different `cycle_id` than the one in the path, causes the whole request to be rejected with `404`, and no `Vote` rows are created or changed for that participant in that cycle -- the whole submission is validated before any row is written
+- [ ] Casting votes on a cycle whose `status` is `open` or `closed` is rejected with `409`, and no `Vote` rows are created or changed
+- [ ] A second `POST` to the votes endpoint from the same participant on the same cycle atomically REPLACES their prior submission: their previous `Vote` rows for that cycle are deleted and only the newly submitted `cluster_ids` remain. A test proves this by casting `[A, A, B]`, then casting `[C]`, and confirming the participant's only recorded votes afterward are a single vote on `C` -- not four rows
+- [ ] A test proves two votes for the same cluster in one submission (e.g. `[A, A, B]`) persist as 2 separate `Vote` rows referencing cluster `A` and 1 referencing cluster `B` -- 3 rows total, not deduplicated into 1
+- [ ] A test proves one participant's votes are independent of another's: participant X casting `[A, A, A]` does not affect, replace, or merge with participant Y's own `[B]` submission on the same cycle -- both persist as separate rows, each keyed to its own participant
+- [ ] A project member can view their own current vote allocation for a cycle (`GET /projects/{project_id}/cycles/{cycle_id}/votes/mine`), returning `200` with `{"cycle_id": ..., "cluster_ids": [...]}` for only the requester's own votes (as a multiset), and `{"cycle_id": ..., "cluster_ids": []}` if they have not voted -- this task adds no endpoint that exposes any other participant's votes or any cross-participant tally; that's #14's job
+- [ ] Viewing own votes on a cycle whose `status` is `open` is rejected with `409` -- no cluster, and so no vote, can exist before reveal, mirroring #11's gating of its listing endpoint; viewing on a `revealed` or `closed` cycle returns `200`
+- [ ] Casting or viewing votes on a `cycle_id` that does not exist, or that belongs to a different `project_id` than the one in the path, is rejected with `404`
+- [ ] Casting or viewing votes without a valid auth token is rejected with `401`
+- [ ] Casting or viewing votes from an authenticated user with no `ProjectMembership` on that project at all is rejected with `403`, not `500`
+- [ ] `uv run pytest` passes, including the new tests
+Out of scope:
+- Any endpoint that tallies, ranks, or reveals vote totals across participants, or hides/shows them based on voting progress -- that's #14's job, which depends on this task only for the underlying `Vote` rows to tally
+- A facilitator (or any) "close voting" action -- also #14's job
+- Any indication of who has or hasn't voted yet -- no follow-up filed since nothing before #14 needs it, and #14 owns deciding what "everyone has voted" means against this task's stored rows
+- A frontend UI for voting -- consistent with #4-#12, no template/static layer exists in the project and nothing later in the plan calls for one, so no follow-up filed
+- Re-validating a participant's earlier vote against clusters created or merged after that vote was cast -- each submission (including the replace on a second `POST`) is validated fresh against the cluster table at request time; #11's merge already moves cards, not votes, so no follow-up filed since nothing in the plan calls for cascading vote behavior on merge
+Constraints:
+- Depends on #11 (Manual clustering board) being merged: votes reference `Cluster` rows created there, and this task's `409`/`404` gating mirrors #11's pattern (`cycle.status == CycleStatus.REVEALED` required for the mutating endpoint, both `open` and `closed` rejected; the read endpoint stays open on `revealed` and `closed`, matching #11's cluster-listing endpoint)
+- `Vote` currently has no participant/user reference (`app/models.py`: only `id`, `cluster_id`, `created_at`) -- add a `participant_id` column (FK to `users.id`, `nullable=False`) via a new Alembic migration, following the same `add_column` + `create_foreign_key` pattern as `migrations/versions/cda190f63753_add_author_id_to_feedback_cards.py`, which added `FeedbackCard.author_id` for #7. No unique constraint on `(participant_id, cluster_id)` -- stacking multiple votes on the same cluster is required behavior, not an error
+- Endpoint shape: a single request carrying an array of 0-3 cluster ids, not one vote per request (up to 3 calls). This lets the endpoint validate and apply a participant's whole allocation atomically in one transaction -- reject the entire request on a `>3` count or an invalid cluster id, with no rows written -- instead of tracking a running per-participant vote count across multiple independent requests, which would need extra state and still be racy between calls
+- Re-vote semantics: a second submission for the same cycle REPLACES the participant's previous votes for that cycle (delete-then-insert in one transaction), rather than being rejected as already-voted or added on top of the prior submission. Nothing in docs/tasks.md's or docs/plan.md's description of voting says it is one-shot, and replace-on-resubmit avoids needing a separate "change my vote" endpoint
+- Use `require_project_member` (not `require_role("facilitator")`) for both routes: docs/plan.md's Roles section lists "Vote" under Team member, and this matches #11's and #12's Constraints that clustering-adjacent actions are open to any project member
+- Add the two routes to a new `app/votes.py` router (`prefix="/projects"`), included from `app/main.py` the same way `app/cycles.py`, `app/cards.py`, and #11's `app/clusters.py` are, following the same Pydantic request/response, `Depends(get_db)`, `Depends(require_project_member)`, `HTTPException(status_code=..., detail=...)` pattern as #10/#11's routes
+- Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 14. Reveal vote results after voting closes
 Goal: Show vote totals only once voting is complete.
