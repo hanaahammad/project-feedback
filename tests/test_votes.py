@@ -121,6 +121,20 @@ def _get_my_votes(client: TestClient, project_id: int, cycle_id: int, token: str
     )
 
 
+def _close_voting(client: TestClient, project_id: int, cycle_id: int, token: str):
+    return client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/close-voting",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+def _get_vote_results(client: TestClient, project_id: int, cycle_id: int, token: str):
+    return client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/votes/results",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # POST /projects/{project_id}/cycles/{cycle_id}/votes
 # ---------------------------------------------------------------------------
@@ -456,5 +470,342 @@ def test_get_my_votes_with_cycle_id_from_a_different_project_is_404(client):
     other_project_id, other_token = _make_project_with_membership(client, "other@example.com", "team_member")
 
     response = _get_my_votes(client, other_project_id, cycle_id, other_token)
+
+    assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST /projects/{project_id}/cycles/{cycle_id}/close-voting
+# ---------------------------------------------------------------------------
+
+
+def test_close_voting_succeeds_as_facilitator_even_if_not_everyone_voted(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    token_y = _signup_and_login(client, "y@example.com")
+    _add_member(client, project_id, "y@example.com", "team_member")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_a = _create_cluster(client, project_id, cycle_id, token, name="A")
+    _cast_votes(client, project_id, cycle_id, token, [cluster_a])
+    # y never votes
+
+    response = _close_voting(client, project_id, cycle_id, token)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"cycle_id": cycle_id, "project_id": project_id, "voting_closed": True}
+    with client.session_local() as db:
+        cycle = db.query(FeedbackCycle).filter(FeedbackCycle.id == cycle_id).first()
+        assert cycle.voting_closed is True
+
+
+def test_close_voting_from_team_member_is_403(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    token_member = _signup_and_login(client, "member@example.com")
+    _add_member(client, project_id, "member@example.com", "team_member")
+    cycle_id = _revealed_cycle(client, project_id, token)
+
+    response = _close_voting(client, project_id, cycle_id, token_member)
+
+    assert response.status_code == 403
+    with client.session_local() as db:
+        cycle = db.query(FeedbackCycle).filter(FeedbackCycle.id == cycle_id).first()
+        assert cycle.voting_closed is False
+
+
+def test_close_voting_on_open_cycle_is_409_and_voting_closed_unchanged(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    response = _close_voting(client, project_id, cycle_id, token)
+
+    assert response.status_code == 409
+    with client.session_local() as db:
+        cycle = db.query(FeedbackCycle).filter(FeedbackCycle.id == cycle_id).first()
+        assert cycle.voting_closed is False
+
+
+def test_close_voting_on_closed_cycle_is_409_and_voting_closed_unchanged(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    _set_cycle_status(client, cycle_id, "closed")
+
+    response = _close_voting(client, project_id, cycle_id, token)
+
+    assert response.status_code == 409
+    with client.session_local() as db:
+        cycle = db.query(FeedbackCycle).filter(FeedbackCycle.id == cycle_id).first()
+        assert cycle.voting_closed is False
+
+
+def test_close_voting_called_twice_is_409_on_second_call_and_stays_closed(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+
+    first = _close_voting(client, project_id, cycle_id, token)
+    second = _close_voting(client, project_id, cycle_id, token)
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    with client.session_local() as db:
+        cycle = db.query(FeedbackCycle).filter(FeedbackCycle.id == cycle_id).first()
+        assert cycle.voting_closed is True
+
+
+def test_close_voting_without_token_is_401(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+
+    response = client.post(f"/projects/{project_id}/cycles/{cycle_id}/close-voting")
+
+    assert response.status_code == 401
+
+
+def test_close_voting_with_no_membership_is_403_not_500(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    outsider_token = _signup_and_login(client, "outsider@example.com")
+
+    response = _close_voting(client, project_id, cycle_id, outsider_token)
+
+    assert response.status_code == 403
+
+
+def test_close_voting_with_nonexistent_cycle_id_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+
+    response = _close_voting(client, project_id, 999999, token)
+
+    assert response.status_code == 404
+
+
+def test_close_voting_with_cycle_id_from_a_different_project_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+
+    other_project_id, other_token = _make_project_with_membership(client, "other@example.com", "facilitator")
+
+    response = _close_voting(client, other_project_id, cycle_id, other_token)
+
+    assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# GET /projects/{project_id}/cycles/{cycle_id}/votes/results
+# ---------------------------------------------------------------------------
+
+
+def test_vote_results_on_open_cycle_is_409(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    response = _get_vote_results(client, project_id, cycle_id, token)
+
+    assert response.status_code == 409
+
+
+def test_vote_results_unavailable_before_everyone_voted_and_before_close(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    token_y = _signup_and_login(client, "y@example.com")
+    _add_member(client, project_id, "y@example.com", "team_member")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_a = _create_cluster(client, project_id, cycle_id, token, name="A")
+    _cast_votes(client, project_id, cycle_id, token, [cluster_a])
+    # y has not voted yet
+
+    response = _get_vote_results(client, project_id, cycle_id, token)
+
+    assert response.status_code == 409
+    assert "cluster" not in response.json()
+    assert response.json() == {"detail": "voting results are not available yet"}
+
+
+def test_vote_results_becomes_available_once_everyone_voted_with_no_close_action(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    token_y = _signup_and_login(client, "y@example.com")
+    _add_member(client, project_id, "y@example.com", "team_member")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_a = _create_cluster(client, project_id, cycle_id, token, name="A")
+    _cast_votes(client, project_id, cycle_id, token, [cluster_a])
+    _cast_votes(client, project_id, cycle_id, token_y, [cluster_a])
+
+    response = _get_vote_results(client, project_id, cycle_id, token)
+
+    assert response.status_code == 200
+    with client.session_local() as db:
+        cycle = db.query(FeedbackCycle).filter(FeedbackCycle.id == cycle_id).first()
+        # No explicit close action was taken -- availability is computed live.
+        assert cycle.voting_closed is False
+
+
+def test_vote_results_empty_ballot_abstention_does_not_count_as_voted(client):
+    """A participant who submits cluster_ids: [] leaves zero Vote rows and
+    must not be counted as having voted for the everyone-voted check -- if
+    they're the only holdout, results stay 409 until the facilitator
+    manually closes voting.
+    """
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    token_y = _signup_and_login(client, "y@example.com")
+    _add_member(client, project_id, "y@example.com", "team_member")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_a = _create_cluster(client, project_id, cycle_id, token, name="A")
+    _cast_votes(client, project_id, cycle_id, token, [cluster_a])
+    abstain_response = _cast_votes(client, project_id, cycle_id, token_y, [])
+    assert abstain_response.status_code == 200
+
+    response = _get_vote_results(client, project_id, cycle_id, token)
+    assert response.status_code == 409
+
+    close_response = _close_voting(client, project_id, cycle_id, token)
+    assert close_response.status_code == 200
+
+    response_after_close = _get_vote_results(client, project_id, cycle_id, token)
+    assert response_after_close.status_code == 200
+
+
+def test_vote_results_available_after_manual_close_even_with_zero_votes(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    _create_cluster(client, project_id, cycle_id, token, name="A")
+
+    close_response = _close_voting(client, project_id, cycle_id, token)
+    assert close_response.status_code == 200
+
+    response = _get_vote_results(client, project_id, cycle_id, token)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["vote_count"] == 0
+
+
+def test_vote_results_ranked_descending_with_zero_vote_cluster_included(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    token_y = _signup_and_login(client, "y@example.com")
+    _add_member(client, project_id, "y@example.com", "team_member")
+    token_z = _signup_and_login(client, "z@example.com")
+    _add_member(client, project_id, "z@example.com", "team_member")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_three = _create_cluster(client, project_id, cycle_id, token, name="Three")
+    cluster_one = _create_cluster(client, project_id, cycle_id, token, name="One")
+    cluster_zero = _create_cluster(client, project_id, cycle_id, token, name="Zero")
+
+    with client.session_local() as db:
+        user_x = db.query(User).filter(User.email == "facilitator@example.com").first()
+        user_y = db.query(User).filter(User.email == "y@example.com").first()
+        user_z = db.query(User).filter(User.email == "z@example.com").first()
+        db.add_all(
+            [
+                Vote(cluster_id=cluster_three, participant_id=user_x.id),
+                Vote(cluster_id=cluster_three, participant_id=user_y.id),
+                Vote(cluster_id=cluster_three, participant_id=user_z.id),
+                Vote(cluster_id=cluster_one, participant_id=user_x.id),
+            ]
+        )
+        db.commit()
+
+    close_response = _close_voting(client, project_id, cycle_id, token)
+    assert close_response.status_code == 200
+
+    response = _get_vote_results(client, project_id, cycle_id, token)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [entry["cluster_id"] for entry in body] == [cluster_three, cluster_one, cluster_zero]
+    assert [entry["vote_count"] for entry in body] == [3, 1, 0]
+    for entry in body:
+        assert set(entry.keys()) == {"cluster_id", "name", "vote_count"}
+
+
+def test_vote_results_tie_break_by_ascending_cluster_id(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_low = _create_cluster(client, project_id, cycle_id, token, name="First")
+    cluster_high = _create_cluster(client, project_id, cycle_id, token, name="Second")
+    assert cluster_low < cluster_high
+
+    with client.session_local() as db:
+        user_x = db.query(User).filter(User.email == "facilitator@example.com").first()
+        db.add_all(
+            [
+                Vote(cluster_id=cluster_high, participant_id=user_x.id),
+                Vote(cluster_id=cluster_low, participant_id=user_x.id),
+            ]
+        )
+        db.commit()
+
+    close_response = _close_voting(client, project_id, cycle_id, token)
+    assert close_response.status_code == 200
+
+    response = _get_vote_results(client, project_id, cycle_id, token)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [entry["cluster_id"] for entry in body] == [cluster_low, cluster_high]
+    assert [entry["vote_count"] for entry in body] == [1, 1]
+
+
+def test_vote_results_remains_available_after_cycle_status_becomes_closed(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_a = _create_cluster(client, project_id, cycle_id, token, name="A")
+    _cast_votes(client, project_id, cycle_id, token, [cluster_a])
+    close_response = _close_voting(client, project_id, cycle_id, token)
+    assert close_response.status_code == 200
+
+    _set_cycle_status(client, cycle_id, "closed")
+
+    response = _get_vote_results(client, project_id, cycle_id, token)
+
+    assert response.status_code == 200
+    assert response.json()[0]["vote_count"] == 1
+
+
+def test_vote_results_without_token_is_401(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+
+    response = client.get(f"/projects/{project_id}/cycles/{cycle_id}/votes/results")
+
+    assert response.status_code == 401
+
+
+def test_vote_results_with_no_membership_is_403_not_500(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    outsider_token = _signup_and_login(client, "outsider@example.com")
+
+    response = _get_vote_results(client, project_id, cycle_id, outsider_token)
+
+    assert response.status_code == 403
+
+
+def test_vote_results_accessible_to_team_member_not_just_facilitator(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    token_member = _signup_and_login(client, "member@example.com")
+    _add_member(client, project_id, "member@example.com", "team_member")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    _create_cluster(client, project_id, cycle_id, token, name="A")
+    _close_voting(client, project_id, cycle_id, token)
+
+    response = _get_vote_results(client, project_id, cycle_id, token_member)
+
+    assert response.status_code == 200
+
+
+def test_vote_results_with_nonexistent_cycle_id_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+
+    response = _get_vote_results(client, project_id, 999999, token)
+
+    assert response.status_code == 404
+
+
+def test_vote_results_with_cycle_id_from_a_different_project_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+
+    other_project_id, other_token = _make_project_with_membership(client, "other@example.com", "team_member")
+
+    response = _get_vote_results(client, other_project_id, cycle_id, other_token)
 
     assert response.status_code == 404

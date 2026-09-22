@@ -94,6 +94,7 @@ class FeedbackCycle(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"))
     status: Mapped[CycleStatus] = mapped_column(Enum(CycleStatus), default=CycleStatus.OPEN)
+    voting_closed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     project: Mapped["Project"] = relationship(back_populates="cycles")
