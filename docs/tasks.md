@@ -27,12 +27,15 @@ Acceptance Criteria:
 
 ## 4. Configurable roles and permissions
 Goal: Support project-level roles instead of hard-coded ones.
-Description: Add a roles concept scoped to a project (e.g. Team Member, Facilitator, plus room for custom roles) and a permission check mechanism that other features can call. Seed the two MVP roles described in the plan: Team Member and Facilitator.
+Description: Add a `ProjectMembership` entity linking a user (task 3) to a project (task 2) with a role. Add a reusable permission-check mechanism (a FastAPI dependency) that any route can use to require a role. For the MVP, only seed the two roles from the plan — Team Member and Facilitator — but store the role as data on the membership row, not as hard-coded branching in application code, so a future custom role doesn't require a code change.
+Depends on: #2 (Core data model), #3 (User authentication)
+Out of scope: any UI or endpoint for creating or editing custom roles — the plan only calls for the two MVP roles; this task is about the schema and permission-check mechanism being role-name-agnostic, not about exposing role management to users.
 Acceptance Criteria:
-- A project member can be assigned the Team Member or Facilitator role
-- A reusable permission-check function exists and is used to gate at least one action
-- An action requiring a role is denied to a user without that role on that project
-- Roles are stored per project-membership, not globally per user
+- A `ProjectMembership` (or equivalent) row links a user, a project, and a role
+- Team Member and Facilitator exist as seeded data, not Python constants compared with if/elif
+- A reusable permission-check dependency exists (e.g. `require_role("facilitator")`) that can be applied to any route
+- Since no protected route exists yet, add one minimal example route guarded by the dependency to prove it end-to-end
+- A test shows that route returns 403 for a member without the required role and 200 for one with it
 
 ## 5. Create and view a project
 Goal: Let a user create a project and see its page.
