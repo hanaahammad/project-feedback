@@ -196,14 +196,39 @@ Constraints:
 - Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 10. Facilitator reveal action
-Goal: Let the facilitator make all submitted cards visible to the team at once.
-Description: Add a "reveal" action, available only to the facilitator, that flips the cycle into a revealed state and makes every submitted card (respecting anonymity) visible to all team members in a single view.
-Depends on: #4 (Configurable roles and permissions), #9 (Private view of own feedback before reveal)
+Goal: The facilitator can reveal an open cycle, flipping its status to `revealed`, after which every project member (team member or facilitator) can view every card submitted to that cycle in a single list -- reusing #8's shared card-serializer so an anonymous card's author stays hidden from everyone, including the facilitator who triggered the reveal.
 Acceptance Criteria:
-- Only the facilitator can trigger reveal on an open cycle
-- After reveal, the cycle's state reflects "revealed" and all cards become visible to every team member
-- Anonymous cards remain anonymous after reveal
-- A non-facilitator attempting to reveal is denied
+- [ ] A facilitator can reveal an open cycle (e.g. `POST /projects/{project_id}/cycles/{cycle_id}/reveal`); the response is `200` and includes the cycle's `id`, `project_id`, and updated `status`
+- [ ] Revealing a cycle whose `status` is `open` sets its `status` to `revealed`; fetching the cycle afterward (e.g. `GET /projects/{project_id}/cycles/{cycle_id}`, from #6) reflects `revealed`, not just the reveal response itself
+- [ ] Revealing a cycle whose `status` is already `revealed` is rejected with `409`, and the cycle's `status` is left unchanged
+- [ ] Revealing a cycle whose `status` is `closed` is rejected with `409`, and the cycle's `status` is left unchanged
+- [ ] A request to reveal from a user who holds only the `team_member` role on that project is rejected with `403`, via the existing `require_role("facilitator")` dependency
+- [ ] A request to reveal without a valid auth token is rejected with `401`
+- [ ] A request to reveal from a user who is authenticated but has no `ProjectMembership` on that project at all is rejected with `403`, not `500`
+- [ ] Revealing a `cycle_id` that does not exist, or that belongs to a different `project_id` than the one in the path, is rejected with `404`
+- [ ] Any project member (`team_member` or `facilitator`) can list every card submitted to a `revealed` or `closed` cycle in one call (e.g. `GET /projects/{project_id}/cycles/{cycle_id}/cards`); the response is a list of cards produced by #8's shared serializer (e.g. `serialize_feedback_card`), covering every card in the cycle regardless of author -- not filtered to the requester's own, unlike #9's `/mine`
+- [ ] A test proves that after reveal, the all-cards response includes cards submitted by multiple different authors in the same cycle, contrasting with #9's per-author isolation
+- [ ] A test proves that a facilitator viewing the all-cards response after reveal cannot see the author of a card submitted with `is_anonymous: true` -- no `author_id` or other author-identifying field appears for that card, using #8's serializer's existing contract, while a non-anonymous card in the same response does show its author's identity
+- [ ] Listing all cards for a cycle whose `status` is still `open` is rejected with `409` -- the all-cards view only exists once reveal has happened; a member's own pre-reveal cards remain visible only through #9's `/mine`
+- [ ] Listing all cards for a `cycle_id` that does not exist, or that belongs to a different `project_id` than the one in the path, is rejected with `404`
+- [ ] A request to list all cards without a valid auth token is rejected with `401`
+- [ ] A request to list all cards from a user who is authenticated but has no `ProjectMembership` on that project at all is rejected with `403`, not `500`
+- [ ] `uv run pytest` passes, including the new tests
+Out of scope:
+- Reverting a `revealed` cycle back to `open` -- nothing in docs/tasks.md's plan calls for un-revealing a cycle, so no follow-up issue is filed for it
+- Closing a cycle (`revealed` -> `closed`) -- that's #15's job, which already owns the cycle-close action as the last step of the live-meeting discussion stage
+- A clustering/board view of revealed cards -- that's #11's job, which depends on this task for cards to be visible in the first place
+- Sorting, filtering, or grouping the all-cards response by category or cluster -- nothing in the plan calls for it at this stage; #11 introduces cluster assignment and its own board view
+- Editing or deleting a card after reveal -- #9 already rejects edits to a card once its cycle is `revealed` or `closed`; this task does not change that
+- A frontend UI for the reveal action or the all-cards view -- consistent with #4-#9, no template/static layer exists in the project and nothing later in the plan calls for one, so no follow-up issue is filed for it
+Constraints:
+- Depends on #4 (Configurable roles and permissions) being merged: use the existing `require_role("facilitator")` dependency from `app/security.py` for the reveal route, and `require_project_member` for the all-cards route -- both team_member and facilitator can view, neither gets special treatment
+- Depends on #9 (Private view of own feedback before reveal) being merged, which itself depends on #8 (Anonymous submission handling): the all-cards endpoint must call #8's shared card-serialization helper (e.g. `serialize_feedback_card`) for every card in its response -- no separate/ad-hoc logic that re-derives which fields to hide for an anonymous card. This task cannot start until #9 lands
+- `FeedbackCycle.status` and the `CycleStatus` enum (`open`, `revealed`, `closed`) already exist in `app/models.py` (from #2) -- no new migration is needed for this task
+- Add the reveal route to the existing `app/cycles.py` router, alongside `create_cycle` and `get_cycle`, following the same Pydantic request/response, `Depends(get_db)`, `HTTPException(status_code=..., detail=...)` pattern
+- Add the all-cards route to the existing `app/cards.py` router, alongside #7/#8/#9's card routes, so it can reuse their serializer and query patterns directly
+- Use the `GET /projects/{project_id}/cycles/{cycle_id}/cards` path (the bare collection, not `/mine`) for the all-cards endpoint, as anticipated by #9's constraints
+- Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 11. Manual clustering board
 Goal: Let the team organize revealed cards into clusters by hand.
