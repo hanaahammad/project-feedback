@@ -139,13 +139,27 @@ Constraints:
 - Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 8. Anonymous submission handling
-Goal: Let contributors mark individual cards as anonymous, and enforce it everywhere.
-Description: Add an anonymous checkbox per card, and make sure the author is hidden from every view and API response for anonymous cards — including to the facilitator. Write a test that specifically checks a facilitator-facing view cannot see the anonymous author.
-Depends on: #7 (Feedback submission form)
+Goal: A contributor can mark a feedback card anonymous when submitting it, and every response that serializes a `FeedbackCard` -- today's submission endpoint and every endpoint added later -- omits the author's identity for a card flagged anonymous, with no exception for the facilitator.
 Acceptance Criteria:
-- A card can be flagged anonymous at submission time
-- No view or API response exposes the author of an anonymous card, including to the facilitator
-- A test explicitly verifies a facilitator-facing endpoint/view cannot retrieve the anonymous author
+- [ ] The card submission endpoint (`POST /projects/{project_id}/cycles/{cycle_id}/cards`, from #7) accepts an optional `is_anonymous` boolean field in its request body; omitting it defaults to `false`, matching the column's existing default
+- [ ] A card submitted with `is_anonymous: true` is persisted with `is_anonymous = True`, and its `author_id` is still set to the submitting user -- anonymity hides the author from output, it does not stop the system from recording who actually submitted it
+- [ ] A card submitted with `is_anonymous` omitted or explicitly `false` is persisted with `is_anonymous = False`
+- [ ] A reusable card-serialization function (e.g. `serialize_feedback_card`) or response schema is added that every endpoint returning `FeedbackCard` data must use; called on a card with `is_anonymous = True`, its output contains no author-identifying field (no `author_id`, no nested author email or name) for any caller, including a facilitator
+- [ ] The same serializer, called on a card with `is_anonymous = False`, includes the author's identity (e.g. `author_id`)
+- [ ] A test exercises the serializer directly against both an anonymous and a non-anonymous card and asserts the author field is present or absent accordingly -- the closest thing to "a facilitator-facing view cannot see the anonymous author" verifiable today, since no card-listing/retrieval endpoint exists yet (see Out of scope)
+- [ ] A test confirms the submission endpoint's own response body -- the only live card-returning response as of this task -- never includes an author field, for both anonymous and non-anonymous cards, consistent with #7's existing response shape (`id`, `cycle_id`, `category`, `text`)
+- [ ] `uv run pytest` passes, including the new tests
+Out of scope:
+- Any endpoint that lists or retrieves previously submitted cards (a member's own pre-reveal cards, the facilitator's post-reveal view, etc.) -- that's #9 and #10's job; neither exists yet, so this task cannot test an actual "facilitator-facing view." #9 and #10 must use the serializer this task adds and must each add their own test proving an anonymous card's author is hidden from their specific view -- for #10 specifically, from the facilitator
+- Editing an already-submitted card's `is_anonymous` flag after creation -- #9 introduces editing a member's own pre-reveal cards; whether that extends to toggling anonymity is #9's call, not this task's
+- A frontend UI/checkbox -- consistent with #4-#7, this task only builds the API-level field and serialization; no template/static layer exists in the project and nothing later in the plan calls for one, so no follow-up issue is filed for it
+Constraints:
+- `FeedbackCard.is_anonymous` already exists on the model (added in #2) -- no migration is needed for the column itself
+- Depends on #7 being merged: add `is_anonymous` to whatever Pydantic request model #7 lands for card submission, in `app/cards.py`
+- Add the serialization helper somewhere shared (e.g. in `app/cards.py`, or a new small module) so #9 and #10 can import and reuse it rather than re-deriving their own card-to-response logic
+- The rule is unconditional: no role, including facilitator, is an exception to hiding the author of an anonymous card
+- Follow the existing FastAPI/Pydantic pattern in `app/auth.py`, `app/projects.py`, and #7's `app/cards.py`
+- Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 9. Private view of own feedback before reveal
 Goal: Let a member see and edit only their own cards before the reveal.
