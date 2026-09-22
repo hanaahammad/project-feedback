@@ -84,6 +84,33 @@ def reveal_cycle(
     return cycle
 
 
+@router.post("/{project_id}/cycles/{cycle_id}/close", response_model=CycleResponse)
+def close_cycle(
+    project_id: int,
+    cycle_id: int,
+    current_user: User = Depends(require_role("facilitator")),
+    db: Session = Depends(get_db),
+) -> FeedbackCycle:
+    cycle = (
+        db.query(FeedbackCycle)
+        .filter(FeedbackCycle.id == cycle_id, FeedbackCycle.project_id == project_id)
+        .first()
+    )
+    if cycle is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cycle not found")
+
+    if cycle.status != CycleStatus.REVEALED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cycle must be revealed to be closed",
+        )
+
+    cycle.status = CycleStatus.CLOSED
+    db.commit()
+    db.refresh(cycle)
+    return cycle
+
+
 @router.post("/{project_id}/members", response_model=MemberResponse, status_code=status.HTTP_201_CREATED)
 def add_member(
     project_id: int,

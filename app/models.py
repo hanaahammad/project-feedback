@@ -25,6 +25,13 @@ class ActionStatus(str, enum.Enum):
     DONE = "done"
 
 
+class DiscussionStatus(str, enum.Enum):
+    PENDING = "pending"
+    DISCUSSED = "discussed"
+    SKIPPED = "skipped"
+    DEFERRED = "deferred"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -110,6 +117,9 @@ class Cluster(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     cycle_id: Mapped[int] = mapped_column(ForeignKey("feedback_cycles.id"))
     name: Mapped[str | None] = mapped_column(String(200))
+    discussion_status: Mapped[DiscussionStatus] = mapped_column(
+        Enum(DiscussionStatus), default=DiscussionStatus.PENDING
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     cycle: Mapped["FeedbackCycle"] = relationship(back_populates="clusters")

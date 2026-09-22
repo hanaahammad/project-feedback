@@ -4,7 +4,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import Cluster, CycleStatus, FeedbackCycle, ProjectMembership, User, Vote
+from app.models import Cluster, CycleStatus, DiscussionStatus, FeedbackCycle, ProjectMembership, User, Vote
 from app.security import require_project_member, require_role
 
 router = APIRouter(prefix="/projects", tags=["votes"])
@@ -38,6 +38,7 @@ class ClusterVoteResult(BaseModel):
     cluster_id: int
     name: str | None
     vote_count: int
+    discussion_status: DiscussionStatus
 
 
 def _get_cycle(db: Session, project_id: int, cycle_id: int) -> FeedbackCycle:
@@ -227,11 +228,19 @@ def vote_results(
     vote_count_column = func.coalesce(vote_count_subquery.c.vote_count, 0)
 
     rows = (
-        db.query(Cluster.id, Cluster.name, vote_count_column.label("vote_count"))
+        db.query(Cluster.id, Cluster.name, Cluster.discussion_status, vote_count_column.label("vote_count"))
         .outerjoin(vote_count_subquery, Cluster.id == vote_count_subquery.c.cluster_id)
         .filter(Cluster.cycle_id == cycle_id)
         .order_by(vote_count_column.desc(), Cluster.id.asc())
         .all()
     )
 
-    return [{"cluster_id": row.id, "name": row.name, "vote_count": row.vote_count} for row in rows]
+    return [
+        {
+            "cluster_id": row.id,
+            "name": row.name,
+            "vote_count": row.vote_count,
+            "discussion_status": row.discussion_status,
+        }
+        for row in rows
+    ]

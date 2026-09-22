@@ -119,6 +119,30 @@ def _create_cluster(client: TestClient, project_id: int, cycle_id: int, token: s
     return response.json()["id"]
 
 
+def _set_discussion_status(
+    client: TestClient, project_id: int, cycle_id: int, cluster_id: int, token: str, status_value: str
+):
+    return client.patch(
+        f"/projects/{project_id}/cycles/{cycle_id}/clusters/{cluster_id}/discussion-status",
+        json={"status": status_value},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+def _close_voting(client: TestClient, project_id: int, cycle_id: int, token: str):
+    return client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/close-voting",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+def _get_vote_results(client: TestClient, project_id: int, cycle_id: int, token: str):
+    return client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/votes/results",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # POST /projects/{project_id}/cycles/{cycle_id}/clusters
 # ---------------------------------------------------------------------------
@@ -1007,6 +1031,211 @@ def test_merge_with_nonexistent_cycle_id_is_404(client):
     )
 
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# PATCH /projects/{project_id}/cycles/{cycle_id}/clusters/{cluster_id}/discussion-status
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status_value", ["discussed", "skipped", "deferred"])
+def test_facilitator_can_set_each_real_discussion_status(client, status_value):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_id = _create_cluster(client, project_id, cycle_id, token, name="Topic")
+
+    response = _set_discussion_status(client, project_id, cycle_id, cluster_id, token, status_value)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"cluster_id": cluster_id, "cycle_id": cycle_id, "status": status_value}
+
+    with client.session_local() as db:
+        cluster = db.query(Cluster).filter(Cluster.id == cluster_id).first()
+        assert cluster.discussion_status == status_value
+
+
+def test_discussion_status_defaults_to_pending_read_back_via_vote_results(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_id = _create_cluster(client, project_id, cycle_id, token, name="Topic")
+
+    _close_voting(client, project_id, cycle_id, token)
+    results = _get_vote_results(client, project_id, cycle_id, token)
+
+    assert results.status_code == 200
+    entry = next(e for e in results.json() if e["cluster_id"] == cluster_id)
+    assert entry["discussion_status"] == "pending"
+
+
+def test_setting_discussion_status_again_overwrites_previous_value_with_no_history(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_id = _create_cluster(client, project_id, cycle_id, token, name="Topic")
+
+    first = _set_discussion_status(client, project_id, cycle_id, cluster_id, token, "discussed")
+    assert first.status_code == 200
+    assert first.json()["status"] == "discussed"
+
+    second = _set_discussion_status(client, project_id, cycle_id, cluster_id, token, "skipped")
+    assert second.status_code == 200
+    assert second.json()["status"] == "skipped"
+
+    with client.session_local() as db:
+        cluster = db.query(Cluster).filter(Cluster.id == cluster_id).first()
+        assert cluster.discussion_status == "skipped"
+
+
+def test_discussion_status_change_visible_via_vote_results_immediately_after_patch(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_id = _create_cluster(client, project_id, cycle_id, token, name="Topic")
+    _close_voting(client, project_id, cycle_id, token)
+
+    before = _get_vote_results(client, project_id, cycle_id, token)
+    entry_before = next(e for e in before.json() if e["cluster_id"] == cluster_id)
+    assert entry_before["discussion_status"] == "pending"
+
+    patch_response = _set_discussion_status(client, project_id, cycle_id, cluster_id, token, "discussed")
+    assert patch_response.status_code == 200
+
+    after = _get_vote_results(client, project_id, cycle_id, token)
+    entry_after = next(e for e in after.json() if e["cluster_id"] == cluster_id)
+    assert entry_after["discussion_status"] == "discussed"
+
+
+def test_set_discussion_status_with_invalid_value_is_422_and_status_unchanged(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_id = _create_cluster(client, project_id, cycle_id, token, name="Topic")
+
+    response = _set_discussion_status(client, project_id, cycle_id, cluster_id, token, "not-a-real-status")
+
+    assert response.status_code == 422
+    with client.session_local() as db:
+        cluster = db.query(Cluster).filter(Cluster.id == cluster_id).first()
+        assert cluster.discussion_status == "pending"
+
+
+def test_set_discussion_status_to_pending_is_422_and_status_unchanged(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_id = _create_cluster(client, project_id, cycle_id, token, name="Topic")
+    _set_discussion_status(client, project_id, cycle_id, cluster_id, token, "discussed")
+
+    response = _set_discussion_status(client, project_id, cycle_id, cluster_id, token, "pending")
+
+    assert response.status_code == 422
+    with client.session_local() as db:
+        cluster = db.query(Cluster).filter(Cluster.id == cluster_id).first()
+        # Still "discussed" from before -- a rejected request never resets
+        # a topic's status back to pending.
+        assert cluster.discussion_status == "discussed"
+
+
+def test_set_discussion_status_on_open_cycle_is_409_and_status_unchanged(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+    # Clusters can only be created while revealed (#11), so reveal long
+    # enough to create one, then revert the cycle back to open before
+    # attempting to set its discussion status.
+    _set_cycle_status(client, cycle_id, "revealed")
+    cluster_id = _create_cluster(client, project_id, cycle_id, token, name="Topic")
+    _set_cycle_status(client, cycle_id, "open")
+
+    response = _set_discussion_status(client, project_id, cycle_id, cluster_id, token, "discussed")
+
+    assert response.status_code == 409
+    with client.session_local() as db:
+        cluster = db.query(Cluster).filter(Cluster.id == cluster_id).first()
+        assert cluster.discussion_status == "pending"
+
+
+def test_set_discussion_status_on_closed_cycle_is_409_and_status_unchanged(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_id = _create_cluster(client, project_id, cycle_id, token, name="Topic")
+    _set_cycle_status(client, cycle_id, "closed")
+
+    response = _set_discussion_status(client, project_id, cycle_id, cluster_id, token, "discussed")
+
+    assert response.status_code == 409
+    with client.session_local() as db:
+        cluster = db.query(Cluster).filter(Cluster.id == cluster_id).first()
+        assert cluster.discussion_status == "pending"
+
+
+def test_set_discussion_status_with_nonexistent_cluster_id_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+
+    response = _set_discussion_status(client, project_id, cycle_id, 999999, token, "discussed")
+
+    assert response.status_code == 404
+
+
+def test_set_discussion_status_with_cluster_from_a_different_cycle_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    other_cycle_id = _revealed_cycle(client, project_id, token)
+    foreign_cluster_id = _create_cluster(client, project_id, other_cycle_id, token, name="Foreign")
+
+    response = _set_discussion_status(client, project_id, cycle_id, foreign_cluster_id, token, "discussed")
+
+    assert response.status_code == 404
+
+
+def test_set_discussion_status_with_cluster_from_a_different_project_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_id = _create_cluster(client, project_id, cycle_id, token, name="Mine")
+
+    other_project_id, other_token = _make_project_with_membership(client, "other@example.com", "facilitator")
+    other_cycle_id = _revealed_cycle(client, other_project_id, other_token)
+
+    response = _set_discussion_status(client, other_project_id, other_cycle_id, cluster_id, other_token, "discussed")
+
+    assert response.status_code == 404
+
+
+def test_set_discussion_status_rejects_team_member_with_403(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_id = _create_cluster(client, project_id, cycle_id, token, name="Topic")
+
+    member_token = _signup_and_login(client, "member@example.com")
+    _add_member(client, project_id, "member@example.com", "team_member")
+
+    response = _set_discussion_status(client, project_id, cycle_id, cluster_id, member_token, "discussed")
+
+    assert response.status_code == 403
+    with client.session_local() as db:
+        cluster = db.query(Cluster).filter(Cluster.id == cluster_id).first()
+        assert cluster.discussion_status == "pending"
+
+
+def test_set_discussion_status_without_token_is_401(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_id = _create_cluster(client, project_id, cycle_id, token, name="Topic")
+
+    response = client.patch(
+        f"/projects/{project_id}/cycles/{cycle_id}/clusters/{cluster_id}/discussion-status",
+        json={"status": "discussed"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_set_discussion_status_with_no_membership_is_403_not_500(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _revealed_cycle(client, project_id, token)
+    cluster_id = _create_cluster(client, project_id, cycle_id, token, name="Topic")
+    outsider_token = _signup_and_login(client, "outsider@example.com")
+
+    response = _set_discussion_status(client, project_id, cycle_id, cluster_id, outsider_token, "discussed")
+
+    assert response.status_code == 403
 
 
 # ---------------------------------------------------------------------------

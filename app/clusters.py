@@ -4,10 +4,20 @@ from sqlalchemy.orm import Session
 
 from app.ai_clustering import generate_cluster_suggestions
 from app.db import get_db
-from app.models import Cluster, CycleStatus, FeedbackCard, FeedbackCycle, User
-from app.security import require_project_member
+from app.models import Cluster, CycleStatus, DiscussionStatus, FeedbackCard, FeedbackCycle, User
+from app.security import require_project_member, require_role
 
 router = APIRouter(prefix="/projects", tags=["clusters"])
+
+# The set of values a facilitator may explicitly set via the
+# discussion-status endpoint. `pending` is deliberately excluded -- it's
+# the default a cluster starts in, and a topic cannot be manually reset
+# back to not-yet-addressed (see #15's acceptance criteria).
+_SETTABLE_DISCUSSION_STATUSES = {
+    DiscussionStatus.DISCUSSED.value,
+    DiscussionStatus.SKIPPED.value,
+    DiscussionStatus.DEFERRED.value,
+}
 
 
 class ClusterCreateRequest(BaseModel):
@@ -36,6 +46,25 @@ class ClusterResponse(BaseModel):
 class SuggestClustersResponse(BaseModel):
     status: str
     clusters: list[ClusterResponse]
+
+
+class DiscussionStatusUpdateRequest(BaseModel):
+    status: str
+
+    @field_validator("status")
+    @classmethod
+    def status_must_be_settable(cls, value: str) -> str:
+        if value not in _SETTABLE_DISCUSSION_STATUSES:
+            raise ValueError(
+                "status must be one of 'discussed', 'skipped', or 'deferred'"
+            )
+        return value
+
+
+class DiscussionStatusResponse(BaseModel):
+    cluster_id: int
+    cycle_id: int
+    status: DiscussionStatus
 
 
 def _get_cycle(db: Session, project_id: int, cycle_id: int) -> FeedbackCycle:
@@ -133,6 +162,34 @@ def rename_cluster(
     db.commit()
     db.refresh(cluster)
     return cluster
+
+
+@router.patch(
+    "/{project_id}/cycles/{cycle_id}/clusters/{cluster_id}/discussion-status",
+    response_model=DiscussionStatusResponse,
+)
+def set_discussion_status(
+    project_id: int,
+    cycle_id: int,
+    cluster_id: int,
+    payload: DiscussionStatusUpdateRequest,
+    current_user: User = Depends(require_role("facilitator")),
+    db: Session = Depends(get_db),
+) -> dict:
+    cycle = _get_cycle(db, project_id, cycle_id)
+    cluster = _get_cluster(db, cycle_id, cluster_id)
+
+    if cycle.status != CycleStatus.REVEALED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Discussion status can only be set on a revealed cycle",
+        )
+
+    cluster.discussion_status = DiscussionStatus(payload.status)
+    db.commit()
+    db.refresh(cluster)
+
+    return {"cluster_id": cluster.id, "cycle_id": cycle_id, "status": cluster.discussion_status}
 
 
 @router.post(

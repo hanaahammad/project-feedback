@@ -713,7 +713,10 @@ def test_vote_results_ranked_descending_with_zero_vote_cluster_included(client):
     assert [entry["cluster_id"] for entry in body] == [cluster_three, cluster_one, cluster_zero]
     assert [entry["vote_count"] for entry in body] == [3, 1, 0]
     for entry in body:
-        assert set(entry.keys()) == {"cluster_id", "name", "vote_count"}
+        assert set(entry.keys()) == {"cluster_id", "name", "vote_count", "discussion_status"}
+        # #15 extends this response with discussion_status; a cluster that
+        # has never had its status set defaults to "pending".
+        assert entry["discussion_status"] == "pending"
 
 
 def test_vote_results_tie_break_by_ascending_cluster_id(client):
