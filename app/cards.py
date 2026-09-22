@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import CardCategory, CycleStatus, FeedbackCard, FeedbackCycle, User
 from app.security import require_project_member
+from app.serializers import serialize_feedback_card
 
 router = APIRouter(prefix="/projects", tags=["cards"])
 
@@ -12,6 +13,7 @@ router = APIRouter(prefix="/projects", tags=["cards"])
 class CardCreateRequest(BaseModel):
     category: CardCategory
     text: str
+    is_anonymous: bool = False
 
     @field_validator("text")
     @classmethod
@@ -41,7 +43,7 @@ def create_card(
     payload: CardCreateRequest,
     current_user: User = Depends(require_project_member),
     db: Session = Depends(get_db),
-) -> FeedbackCard:
+) -> dict:
     cycle = (
         db.query(FeedbackCycle)
         .filter(FeedbackCycle.id == cycle_id, FeedbackCycle.project_id == project_id)
@@ -61,8 +63,15 @@ def create_card(
         category=payload.category,
         text=payload.text,
         author_id=current_user.id,
+        is_anonymous=payload.is_anonymous,
     )
     db.add(card)
     db.commit()
     db.refresh(card)
-    return card
+
+    # Route the response through the shared serializer so the anonymity
+    # rule is applied consistently, then let CardResponse's declared
+    # fields (id, cycle_id, category, text) filter it down -- this
+    # endpoint's response shape has never included an author field, for
+    # either an anonymous or a non-anonymous card.
+    return serialize_feedback_card(card)

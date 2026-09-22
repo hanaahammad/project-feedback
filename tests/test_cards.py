@@ -6,7 +6,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.db import Base, get_db
 from app.main import app
-from app.models import FeedbackCard, FeedbackCycle, Project, ProjectMembership, Role, User
+from app.models import CardCategory, FeedbackCard, FeedbackCycle, Project, ProjectMembership, Role, User
+from app.serializers import serialize_feedback_card
 
 
 @pytest.fixture
@@ -337,3 +338,156 @@ def test_submit_card_with_nonexistent_cycle_id_is_404(client):
 
     with client.session_local() as db:
         assert db.query(FeedbackCard).count() == 0
+
+
+# ---------------------------------------------------------------------------
+# is_anonymous (#8)
+# ---------------------------------------------------------------------------
+
+
+def test_submit_card_with_is_anonymous_true_is_persisted_anonymous_with_author_id_set(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Anonymous feedback", "is_anonymous": True},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 201
+
+    with client.session_local() as db:
+        user = db.query(User).filter(User.email == "facilitator@example.com").first()
+        card = db.query(FeedbackCard).filter(FeedbackCard.id == response.json()["id"]).first()
+        assert card.is_anonymous is True
+        assert card.author_id == user.id
+
+
+def test_submit_card_with_is_anonymous_omitted_defaults_to_false(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Not anonymous"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 201
+
+    with client.session_local() as db:
+        card = db.query(FeedbackCard).filter(FeedbackCard.id == response.json()["id"]).first()
+        assert card.is_anonymous is False
+
+
+def test_submit_card_with_is_anonymous_explicitly_false_is_persisted_not_anonymous(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Explicitly not anonymous", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 201
+
+    with client.session_local() as db:
+        card = db.query(FeedbackCard).filter(FeedbackCard.id == response.json()["id"]).first()
+        assert card.is_anonymous is False
+
+
+def test_submission_response_never_includes_an_author_field_for_anonymous_card(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Anonymous feedback", "is_anonymous": True},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert set(body.keys()) == {"id", "cycle_id", "category", "text"}
+    assert "author_id" not in body
+
+
+def test_submission_response_never_includes_an_author_field_for_non_anonymous_card(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Not anonymous", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert set(body.keys()) == {"id", "cycle_id", "category", "text"}
+    assert "author_id" not in body
+
+
+# ---------------------------------------------------------------------------
+# serialize_feedback_card (#8) -- exercised directly, not just through HTTP
+# ---------------------------------------------------------------------------
+
+
+def test_serialize_feedback_card_omits_author_id_for_anonymous_card():
+    card = FeedbackCard(
+        id=1,
+        cycle_id=1,
+        cluster_id=None,
+        category=CardCategory.START,
+        text="Anonymous feedback",
+        is_anonymous=True,
+        author_id=42,
+    )
+
+    result = serialize_feedback_card(card)
+
+    assert "author_id" not in result
+    assert result["is_anonymous"] is True
+    assert result["id"] == 1
+    assert result["cycle_id"] == 1
+    assert result["category"] == CardCategory.START
+    assert result["text"] == "Anonymous feedback"
+
+
+def test_serialize_feedback_card_includes_author_id_for_non_anonymous_card():
+    card = FeedbackCard(
+        id=2,
+        cycle_id=1,
+        cluster_id=None,
+        category=CardCategory.STOP,
+        text="Not anonymous",
+        is_anonymous=False,
+        author_id=42,
+    )
+
+    result = serialize_feedback_card(card)
+
+    assert result["author_id"] == 42
+    assert result["is_anonymous"] is False
+
+
+def test_serialize_feedback_card_hides_author_even_when_called_as_if_by_a_facilitator():
+    # The serializer takes no caller/role argument -- the anonymity rule is
+    # unconditional, with no facilitator exception. This test documents
+    # that by asserting the output is identical regardless of who would be
+    # viewing it; there is no "facilitator view" parameter to pass.
+    card = FeedbackCard(
+        id=3,
+        cycle_id=1,
+        cluster_id=None,
+        category=CardCategory.CONTINUE,
+        text="Anonymous feedback for facilitator view",
+        is_anonymous=True,
+        author_id=99,
+    )
+
+    result = serialize_feedback_card(card)
+
+    assert "author_id" not in result
