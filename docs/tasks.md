@@ -382,15 +382,49 @@ Constraints:
 - Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 15. Discussion stage with topic status
-Goal: Let the facilitator move through the vote-ranked topics during the meeting, and close the cycle when the meeting ends.
-Description: Build a discussion view listing topics in vote order, where the facilitator can mark each one Discussed, Skipped, or Deferred. This is a live, in-meeting control surface, not a historical report. "Topic" here is the same `Cluster` entity from #2/#11 — reveal it in vote order rather than modeling anything new. Nothing in the backlog before this task ever moves a cycle out of the `revealed` state, but #18 (meeting upload) requires a `closed` cycle — so this task also owns the facilitator action that closes the cycle once the discussion is done (a real gap found while grooming #6, flagged here since this is the natural place to close it: the last live-meeting control surface before upload/summary tasks take over).
+Goal: The facilitator can step through a revealed cycle's topics (clusters) in vote-ranked order during the live meeting, marking each one Discussed, Skipped, or Deferred, and can close the cycle once discussion is done -- the action that finally moves a cycle out of `revealed` into `closed`, unblocking #18's meeting upload.
 Depends on: #4 (Configurable roles and permissions), #14 (Reveal vote results after voting closes)
 Acceptance Criteria:
-- Topics are listed in vote-ranked order
-- The facilitator can set a topic's status to Discussed, Skipped, or Deferred
-- A non-facilitator cannot change topic status
-- Status changes are reflected immediately to other viewers
-- The facilitator can close the cycle (status -> `closed`), and a non-facilitator cannot
+- [ ] A facilitator can set a topic's discussion status on a revealed cycle (`PATCH /projects/{project_id}/cycles/{cycle_id}/clusters/{cluster_id}/discussion-status` with body `{"status": "discussed"}`); the `200` response includes `cluster_id`, `cycle_id`, and the updated `status`
+- [ ] `status` accepts exactly `"discussed"`, `"skipped"`, or `"deferred"`; any other value -- including `"pending"`, since a topic cannot be manually reset back to not-yet-addressed -- is rejected with `422`, and the cluster's discussion status is left unchanged
+- [ ] A cluster that has never had its discussion status set defaults to `pending`; a test proves this by reading it back via #14's `GET .../votes/results` (extended by this task, see below) before any status change is made
+- [ ] Setting a topic's discussion status again (e.g. `discussed` -> `skipped`) overwrites the previous value; a test proves the final status is whichever was set last, with no history of prior values retained
+- [ ] Setting a topic's discussion status on a cycle whose `status` is `open` or `closed` is rejected with `409`, and the cluster's discussion status is left unchanged
+- [ ] Setting discussion status for a `cluster_id` that does not exist, or that belongs to a different `cycle_id`/`project_id` than the path, is rejected with `404`
+- [ ] A request to set discussion status from a user who holds only the `team_member` role on that project is rejected with `403`, via the existing `require_role("facilitator")` dependency
+- [ ] A request to set discussion status without a valid auth token is rejected with `401`
+- [ ] A request to set discussion status from an authenticated user who has no `ProjectMembership` on that project at all is rejected with `403`, not `500`
+- [ ] #14's `GET /projects/{project_id}/cycles/{cycle_id}/votes/results` response entries are extended by this task to include a `discussion_status` field alongside the existing `cluster_id`, `name`, and `vote_count` -- this task does not add a separate "list topics in vote order" endpoint (see Constraints)
+- [ ] A test proves a discussion-status change is visible through `votes/results` immediately after the `PATCH` call, with no caching or staleness -- consistent with #14 computing its response live on every call
+- [ ] The facilitator can close a revealed cycle (`POST /projects/{project_id}/cycles/{cycle_id}/close`); the `200` response includes the cycle's `id`, `project_id`, and updated `status`
+- [ ] Closing a cycle whose `status` is `revealed` sets its `status` to `closed`; fetching the cycle afterward (`GET /projects/{project_id}/cycles/{cycle_id}`, from #6) reflects `closed`, not just the close response itself
+- [ ] Closing a cycle whose `status` is `open` is rejected with `409` (it must be revealed first), and the cycle's `status` is left unchanged
+- [ ] Closing a cycle whose `status` is already `closed` is rejected with `409`, and the cycle's `status` is left unchanged
+- [ ] The facilitator can close a cycle regardless of how many topics have been marked Discussed/Skipped/Deferred, including when every topic is still `pending` -- closing is not gated on discussion completeness
+- [ ] A request to close a cycle from a user who holds only the `team_member` role on that project is rejected with `403`, via `require_role("facilitator")`
+- [ ] A request to close a cycle without a valid auth token is rejected with `401`
+- [ ] A request to close a cycle from an authenticated user who has no `ProjectMembership` on that project at all is rejected with `403`, not `500`
+- [ ] Closing a `cycle_id` that does not exist, or that belongs to a different `project_id` than the one in the path, is rejected with `404`
+- [ ] `uv run pytest` passes, including the new tests covering the cases above
+Out of scope:
+- Any historical log of discussion-status changes (who changed it, when, prior values) -- only the current status is needed by #16/#22 later in the plan; no follow-up filed
+- Reverting a `closed` cycle back to `revealed` or `open` -- no un-close endpoint is added; nothing in the plan calls for it, matching #10's precedent of not filing a follow-up for un-revealing
+- A dedicated "list topics in vote order" endpoint -- this task deliberately extends and reuses #14's `GET .../votes/results` instead of duplicating its vote-ranked ordering/query logic (see Constraints)
+- Real-time push/websocket notification of status changes to other viewers -- this project has no real-time infrastructure anywhere in the backlog; "reflected immediately" here means a fresh `GET` call returns the current value, not a live push, consistent with #14 leaving the same out of scope for its own results endpoint. No follow-up filed since nothing in docs/plan.md calls for push notifications
+- Free-text notes, decisions, or action items tied to a topic during discussion -- that's #16's job, which depends on this task for the discussion view to exist
+- Requiring every topic to be marked before the cycle can close -- deliberately not required (see Acceptance Criteria); no follow-up filed since nothing in the plan calls for it
+- A frontend UI for the discussion view -- consistent with #4-#14, no template/static layer exists in the project and nothing later in the plan calls for one, so no follow-up filed
+Constraints:
+- Depends on #4 (Configurable roles and permissions) and #14 (Reveal vote results after voting closes) being merged: both are groomed but not yet implemented as of this task being groomed -- this task's routes and migration cannot be written, and #14's response model cannot be extended, until #14's actual merged code exists. Build against #14's real endpoint, not a re-derived one
+- Add a new `DiscussionStatus(str, enum.Enum)` to `app/models.py` with values `PENDING`, `DISCUSSED`, `SKIPPED`, `DEFERRED` (matching the existing `str, enum.Enum` + lowercase-value style of `CycleStatus`/`CardCategory`/`ActionStatus`), and add `discussion_status: Mapped[DiscussionStatus] = mapped_column(Enum(DiscussionStatus), default=DiscussionStatus.PENDING)` to `Cluster` in `app/models.py`
+- Generate the schema change via `uv run alembic revision --autogenerate -m "..."`, matching the existing files in `migrations/versions/` (`cda190f63753_add_author_id_to_feedback_cards.py` is the most recent as of this writing; #13's and #14's own migrations will already exist by the time this task starts, per Depends on -- follow whichever file is newest at implementation time)
+- No new migration is needed for the cycle-close transition itself -- `FeedbackCycle.status` and `CycleStatus.CLOSED` already exist in `app/models.py` (from #2); this task only adds the route that performs the `REVEALED` -> `CLOSED` write
+- Add the discussion-status route to a new `app/discussion.py` router (or extend #14's `app/votes.py` -- implementer's choice, matching the existing router-per-resource pattern), included from `app/main.py` the same way the other routers are
+- Add the close-cycle route to the existing `app/cycles.py` router, alongside `create_cycle`, `get_cycle`, and `reveal_cycle`, following the same Pydantic request/response, `Depends(get_db)`, `Depends(require_role("facilitator"))`, `HTTPException(status_code=..., detail=...)` pattern already used by `reveal_cycle`
+- Don't add a separate "list topics in vote order" endpoint: extend #14's `GET .../votes/results` response entries to also include `discussion_status` (alongside the existing `cluster_id`, `name`, `vote_count`) -- #14 already computes and returns clusters in vote-ranked order, and a second endpoint duplicating that ordering/query logic would just be two sources of truth for the same list. This task's own new endpoints are write-only: set a topic's status, and close the cycle
+- Every mutating endpoint in this task must gate on cycle status: the discussion-status `PATCH` requires `cycle.status == CycleStatus.REVEALED`, rejecting both `open` and `closed` with `409`; the close `POST` requires `cycle.status == CycleStatus.REVEALED` too, rejecting both `open` (nothing to close yet) and already-`closed` with `409` -- mirroring the gating pattern already used by #7/#10/#11/#13/#14
+- Use `require_role("facilitator")` (not `require_project_member`) for both new endpoints -- per docs/plan.md's "Run the discussion" step (facilitator marks each topic) and its Facilitator role list ("Create and close feedback cycles", "Control the retrospective stages"), both actions in this task are facilitator-only, distinct from clustering/voting which #11/#12/#13 already opened to any project member
+- Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 16. Record notes, decisions, and action items during discussion
 Goal: Let the team capture outcomes while discussing a topic.
