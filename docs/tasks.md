@@ -184,14 +184,15 @@ Acceptance Criteria:
 - The results view ranks clusters by total votes
 
 ## 15. Discussion stage with topic status
-Goal: Let the facilitator move through the vote-ranked topics during the meeting.
-Description: Build a discussion view listing topics in vote order, where the facilitator can mark each one Discussed, Skipped, or Deferred. This is a live, in-meeting control surface, not a historical report. "Topic" here is the same `Cluster` entity from #2/#11 — reveal it in vote order rather than modeling anything new.
+Goal: Let the facilitator move through the vote-ranked topics during the meeting, and close the cycle when the meeting ends.
+Description: Build a discussion view listing topics in vote order, where the facilitator can mark each one Discussed, Skipped, or Deferred. This is a live, in-meeting control surface, not a historical report. "Topic" here is the same `Cluster` entity from #2/#11 — reveal it in vote order rather than modeling anything new. Nothing in the backlog before this task ever moves a cycle out of the `revealed` state, but #18 (meeting upload) requires a `closed` cycle — so this task also owns the facilitator action that closes the cycle once the discussion is done (a real gap found while grooming #6, flagged here since this is the natural place to close it: the last live-meeting control surface before upload/summary tasks take over).
 Depends on: #4 (Configurable roles and permissions), #14 (Reveal vote results after voting closes)
 Acceptance Criteria:
 - Topics are listed in vote-ranked order
 - The facilitator can set a topic's status to Discussed, Skipped, or Deferred
 - A non-facilitator cannot change topic status
 - Status changes are reflected immediately to other viewers
+- The facilitator can close the cycle (status -> `closed`), and a non-facilitator cannot
 
 ## 16. Record notes, decisions, and action items during discussion
 Goal: Let the team capture outcomes while discussing a topic.
