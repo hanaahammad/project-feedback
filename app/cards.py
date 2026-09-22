@@ -3,7 +3,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import CardCategory, CycleStatus, FeedbackCard, FeedbackCycle, User
+from app.models import CardCategory, Cluster, CycleStatus, FeedbackCard, FeedbackCycle, User
 from app.security import require_project_member
 from app.serializers import serialize_feedback_card
 
@@ -30,6 +30,10 @@ class CardResponse(BaseModel):
     text: str
 
     model_config = {"from_attributes": True}
+
+
+class CardClusterReassignRequest(BaseModel):
+    cluster_id: int | None
 
 
 class CardEditRequest(BaseModel):
@@ -207,6 +211,59 @@ def update_card(
     card.category = payload.category
     card.text = payload.text
     card.is_anonymous = payload.is_anonymous
+    db.commit()
+    db.refresh(card)
+
+    return serialize_feedback_card(card)
+
+
+@router.patch(
+    "/{project_id}/cycles/{cycle_id}/cards/{card_id}/cluster",
+    response_model=dict,
+)
+def reassign_card_cluster(
+    project_id: int,
+    cycle_id: int,
+    card_id: int,
+    payload: CardClusterReassignRequest,
+    current_user: User = Depends(require_project_member),
+    db: Session = Depends(get_db),
+) -> dict:
+    cycle = (
+        db.query(FeedbackCycle)
+        .filter(FeedbackCycle.id == cycle_id, FeedbackCycle.project_id == project_id)
+        .first()
+    )
+    if cycle is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cycle not found")
+
+    # Unlike update_card, this is not scoped to author_id -- any project
+    # member may reassign any card's cluster, per #11's "not
+    # facilitator-only" clustering constraint.
+    card = (
+        db.query(FeedbackCard)
+        .filter(FeedbackCard.id == card_id, FeedbackCard.cycle_id == cycle_id)
+        .first()
+    )
+    if card is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Card not found")
+
+    if cycle.status != CycleStatus.REVEALED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cards can only be reassigned to a cluster on a revealed cycle",
+        )
+
+    if payload.cluster_id is not None:
+        cluster = (
+            db.query(Cluster)
+            .filter(Cluster.id == payload.cluster_id, Cluster.cycle_id == cycle_id)
+            .first()
+        )
+        if cluster is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cluster not found")
+
+    card.cluster_id = payload.cluster_id
     db.commit()
     db.refresh(card)
 
