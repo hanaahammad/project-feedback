@@ -64,3 +64,31 @@ def require_role(role_name: str):
         return current_user
 
     return dependency
+
+
+def require_project_member(
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> User:
+    """FastAPI dependency that requires the current user to have *any*
+    `ProjectMembership` (regardless of role) on the project identified by the
+    `project_id` path parameter.
+
+    Unlike `require_role`, this does not check the membership's role name --
+    it only requires that a membership row exists. Depends on
+    `get_current_user`, so a missing/invalid token still yields 401 before
+    the membership check runs.
+    """
+    membership = (
+        db.query(ProjectMembership)
+        .filter(
+            ProjectMembership.user_id == current_user.id,
+            ProjectMembership.project_id == project_id,
+        )
+        .first()
+    )
+    if membership is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+
+    return current_user

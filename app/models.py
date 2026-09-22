@@ -35,6 +35,7 @@ class User(Base):
 
     tokens: Mapped[list["AuthToken"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     memberships: Mapped[list["ProjectMembership"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    cards: Mapped[list["FeedbackCard"]] = relationship(back_populates="author")
 
 
 class AuthToken(Base):
@@ -123,6 +124,7 @@ class FeedbackCard(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     cycle_id: Mapped[int] = mapped_column(ForeignKey("feedback_cycles.id"))
     cluster_id: Mapped[int | None] = mapped_column(ForeignKey("clusters.id"))
+    author_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     category: Mapped[CardCategory] = mapped_column(Enum(CardCategory))
     text: Mapped[str] = mapped_column(Text)
     is_anonymous: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -130,6 +132,7 @@ class FeedbackCard(Base):
 
     cycle: Mapped["FeedbackCycle"] = relationship(back_populates="cards")
     cluster: Mapped["Cluster | None"] = relationship(back_populates="cards")
+    author: Mapped["User"] = relationship(back_populates="cards")
 
 
 class Vote(Base):

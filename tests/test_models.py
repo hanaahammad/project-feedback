@@ -16,6 +16,7 @@ from app.models import (
     FeedbackCard,
     FeedbackCycle,
     Project,
+    User,
     Vote,
 )
 
@@ -38,6 +39,10 @@ def test_entities_persist_with_relationships(session):
     session.add(project)
     session.flush()
 
+    author = User(email="author@example.com", password_hash="hashed")
+    session.add(author)
+    session.flush()
+
     cycle = FeedbackCycle(project_id=project.id, status=CycleStatus.OPEN)
     session.add(cycle)
     session.flush()
@@ -49,6 +54,7 @@ def test_entities_persist_with_relationships(session):
     card = FeedbackCard(
         cycle_id=cycle.id,
         cluster_id=cluster.id,
+        author_id=author.id,
         category=CardCategory.START,
         text="Start writing weekly summaries",
         is_anonymous=True,
@@ -81,6 +87,8 @@ def test_entities_persist_with_relationships(session):
     assert len(reloaded_cluster.cards) == 1
     assert reloaded_cluster.cards[0].category == CardCategory.START
     assert reloaded_cluster.cards[0].is_anonymous is True
+    assert reloaded_cluster.cards[0].author_id == author.id
+    assert reloaded_cluster.cards[0].author.email == "author@example.com"
 
     assert len(reloaded_cluster.votes) == 1
     assert len(reloaded_cluster.notes) == 1
