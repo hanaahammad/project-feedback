@@ -231,13 +231,49 @@ Constraints:
 - Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 11. Manual clustering board
-Goal: Let the team organize revealed cards into clusters by hand.
-Description: Build a board view of revealed cards where users can move cards between clusters, merge or split clusters, rename clusters, and leave cards ungrouped. Persist cluster membership so it survives a page reload.
-Depends on: #2 (Core data model), #10 (Facilitator reveal action)
+Goal: Any project member (`team_member` or `facilitator`) can organize a revealed cycle's cards into clusters -- creating clusters, moving cards between them (including back to ungrouped), renaming clusters, and merging clusters -- with every change persisted immediately, reusing #8's shared card-serializer (`serialize_feedback_card`, which already returns `cluster_id`) so the board's state is always reconstructable from a fresh `GET`.
 Acceptance Criteria:
-- Cards can be moved between clusters, and clusters can be merged, split, and renamed
-- Cards can be left ungrouped
-- Cluster membership is persisted and still correct after a reload
+- [ ] A project member can create a new, empty cluster on a revealed cycle (`POST /projects/{project_id}/cycles/{cycle_id}/clusters`) with an optional `name`; the response is `201` and includes the cluster's `id`, `cycle_id`, and `name` (`null` if omitted)
+- [ ] Creating a cluster on a cycle whose `status` is `open` or `closed` is rejected with `409`, and no cluster row is created
+- [ ] A project member can list every cluster in a cycle (`GET /projects/{project_id}/cycles/{cycle_id}/clusters`); each entry includes `id`, `cycle_id`, and `name`
+- [ ] Listing clusters for a cycle whose `status` is `open` is rejected with `409` -- no cluster can exist before reveal, matching #10's gating of the all-cards endpoint
+- [ ] Listing clusters for a `revealed` or `closed` cycle returns `200` -- the list stays readable after the cycle is later closed, consistent with #10's all-cards endpoint remaining readable post-close
+- [ ] A project member can rename an existing cluster (`PATCH /projects/{project_id}/cycles/{cycle_id}/clusters/{cluster_id}` with body `{"name": "..."}`); the `200` response reflects the new `name`
+- [ ] Renaming a cluster with a blank or whitespace-only `name` is rejected with `422`, and the cluster's `name` is left unchanged
+- [ ] Renaming a `cluster_id` that does not exist, or that belongs to a different `cycle_id`/`project_id` than the path, is rejected with `404`
+- [ ] Renaming a cluster on a cycle whose `status` is not `revealed` (i.e. `open` or `closed`) is rejected with `409`
+- [ ] A project member can reassign a card to a different cluster (`PATCH /projects/{project_id}/cycles/{cycle_id}/cards/{card_id}/cluster` with body `{"cluster_id": <id>}`); the `200` response is the card produced by #8's `serialize_feedback_card`, showing the updated `cluster_id`
+- [ ] A project member can leave a card ungrouped by sending `{"cluster_id": null}` to the same endpoint; the card's `cluster_id` becomes `null` and the card continues to appear in #10's all-cards listing (`GET /projects/{project_id}/cycles/{cycle_id}/cards`) with `cluster_id: null`
+- [ ] Reassigning a card to a `cluster_id` that does not exist, or that belongs to a different `cycle_id` than the card's own cycle, is rejected with `404`, and the card's `cluster_id` is left unchanged
+- [ ] Reassigning a `card_id` that does not exist, or that belongs to a different `cycle_id`/`project_id` than the path, is rejected with `404`
+- [ ] Reassigning a card's cluster on a cycle whose `status` is not `revealed` is rejected with `409`
+- [ ] A project member can merge one cluster into another (`POST /projects/{project_id}/cycles/{cycle_id}/clusters/{source_id}/merge-into/{target_id}`); the `200` response is the target cluster, every card previously in the source cluster now has `cluster_id` equal to the target cluster's `id`, and the source cluster no longer appears in the cluster listing afterward
+- [ ] Merging a cluster into itself (`source_id == target_id`) is rejected with `422`, and no cards are moved
+- [ ] Merging when either the source or target `cluster_id` does not exist, or belongs to a different `cycle_id`/`project_id` than the path, is rejected with `404`
+- [ ] Merging on a cycle whose `status` is not `revealed` is rejected with `409`
+- [ ] There is no dedicated "split" endpoint -- a test demonstrates that splitting a cluster is achieved by combining the create-cluster and reassign-card-cluster endpoints above: creating a new cluster and moving a subset of the original cluster's cards into it, leaving the rest in the original cluster
+- [ ] A test proves persistence across a simulated reload: after creating clusters, reassigning cards (including to `null`), and merging, a fresh `GET` of the clusters list and a fresh `GET` of the all-cards list both reflect the exact same state as immediately after the mutations, with no reliance on in-memory/request-scoped state
+- [ ] Each of the four mutating endpoints (create cluster, rename cluster, reassign card cluster, merge clusters) rejects a request without a valid auth token with `401`
+- [ ] Each of the four mutating endpoints and the two listing endpoints (list clusters, and the reassign endpoint's cluster lookups) rejects a request from an authenticated user with no `ProjectMembership` on that project at all with `403`, not `500`
+- [ ] Every endpoint in this task rejects a `cycle_id` that does not exist, or that belongs to a different `project_id` than the one in the path, with `404`
+- [ ] `uv run pytest` passes, including the new tests
+Out of scope:
+- Automatic/AI-suggested clustering on reveal -- that's #12's job, which depends on this task's manual controls already existing and must remain fully editable through them
+- Voting on clusters -- that's #13's job, which depends on this task for clusters to vote on
+- A dedicated "delete cluster" endpoint, independent of merge -- the task only names "move", "merge", "split", "rename", and "leave ungrouped" as operations; merging into another cluster is the only supported way to empty a cluster, and an empty, unmerged cluster is allowed to remain in the listing indefinitely. No follow-up filed since nothing in the plan calls for a standalone delete
+- A frontend UI for the board -- consistent with #4-#10, no template/static layer exists in the project and nothing later in the plan calls for one, so no follow-up filed
+- Reassigning or cascading votes, notes, decisions, or action items attached to a cluster that gets merged away -- moot for this task since #13 (voting) and #16 (notes/decisions/action items) haven't landed yet, so no `Cluster` can have any such rows attached when this task ships. Flagged here because `Cluster.votes` and `Cluster.notes` are declared with `cascade="all, delete-orphan"` in `app/models.py`, so a future merge on a cluster that does have votes/notes would delete them along with the source cluster row -- already covered by #13 and #16, which land those rows and so are the natural place to decide merge's behavior for them, so no new follow-up filed
+Constraints:
+- `Cluster` and `FeedbackCard.cluster_id` already exist in `app/models.py` (from #2) -- no new migration is needed for this task
+- Depends on #10 (Facilitator reveal action) being merged: clustering only operates on a `revealed` cycle, and the board is reconstructed from #10's `GET /projects/{project_id}/cycles/{cycle_id}/cards` (all-cards, via #8's `serialize_feedback_card`, which already includes `cluster_id`) plus this task's new cluster-listing endpoint -- no separate "board" endpoint that duplicates card data
+- Per docs/plan.md's "Reveal and cluster feedback" step ("The team can then: move cards between clusters...") and its Roles section (Team member: "Participate in clustering"), clustering is not facilitator-only -- use `require_project_member` (not `require_role("facilitator")`) for every new route, so both `team_member` and `facilitator` can act
+- Every mutating endpoint (create cluster, rename cluster, reassign card cluster, merge clusters) must check `cycle.status == CycleStatus.REVEALED` and reject with `409` otherwise (both `open` and `closed` are rejected) -- mirrors the `409` gating pattern already used by #7 (card submission) and #10 (reveal, all-cards)
+- Split is deliberately not a dedicated endpoint: the create-cluster and reassign-card-cluster endpoints already compose into a split (create a new cluster, move some of the original cluster's cards into it), so a third endpoint would just be sugar over the other two -- implement it as documented above, not as a new route
+- Add cluster CRUD and merge routes to a new `app/clusters.py` router (`prefix="/projects"`, following the `app/cycles.py` pattern), included from `app/main.py` the same way the other routers are
+- Add the card-cluster reassignment route (`PATCH .../cards/{card_id}/cluster`) to the existing `app/cards.py` router, since it operates on `FeedbackCard`, not `Cluster`, and can reuse `serialize_feedback_card` directly
+- Every response that includes card data must be built through #8's `serialize_feedback_card` -- no separate/ad-hoc logic that re-derives which fields to hide for an anonymous card
+- Follow the existing FastAPI/Pydantic pattern in `app/cycles.py` and `app/cards.py`: Pydantic request/response models, `response_model=...`, `Depends(get_db)`, `Depends(require_project_member)`, `HTTPException(status_code=..., detail=...)`
+- Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 12. Automatic clustering suggestions
 Goal: Pre-group revealed cards into suggested clusters using AI.
