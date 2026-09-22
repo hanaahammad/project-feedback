@@ -36,6 +36,7 @@ class User(Base):
     tokens: Mapped[list["AuthToken"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     memberships: Mapped[list["ProjectMembership"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     cards: Mapped[list["FeedbackCard"]] = relationship(back_populates="author")
+    votes: Mapped[list["Vote"]] = relationship(back_populates="participant")
 
 
 class AuthToken(Base):
@@ -140,9 +141,11 @@ class Vote(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"))
+    participant_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     cluster: Mapped["Cluster"] = relationship(back_populates="votes")
+    participant: Mapped["User"] = relationship(back_populates="votes")
 
 
 class DiscussionNote(Base):

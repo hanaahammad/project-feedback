@@ -59,7 +59,7 @@ def test_entities_persist_with_relationships(session):
         text="Start writing weekly summaries",
         is_anonymous=True,
     )
-    vote = Vote(cluster_id=cluster.id)
+    vote = Vote(cluster_id=cluster.id, participant_id=author.id)
     note = DiscussionNote(cluster_id=cluster.id, text="Team agrees this is a priority")
     decision = Decision(cycle_id=cycle.id, cluster_id=cluster.id, description="Adopt weekly summaries")
     action_item = ActionItem(
