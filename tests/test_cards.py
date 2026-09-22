@@ -923,6 +923,216 @@ def test_edit_card_with_no_membership_is_403_not_500(client):
     assert response.status_code == 403
 
 
+# ---------------------------------------------------------------------------
+# GET /projects/{project_id}/cycles/{cycle_id}/cards
+# ---------------------------------------------------------------------------
+
+
+def test_list_all_cards_returns_every_card_in_the_cycle_after_reveal(client):
+    project_id, facilitator_token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, facilitator_token)
+
+    member_token = _signup_and_login(client, "member@example.com")
+    _add_member(client, project_id, "member@example.com", "team_member")
+
+    client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Facilitator's card"},
+        headers={"Authorization": f"Bearer {facilitator_token}"},
+    )
+    client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "stop", "text": "Member's card"},
+        headers={"Authorization": f"Bearer {member_token}"},
+    )
+
+    _set_cycle_status(client, cycle_id, "revealed")
+
+    response = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        headers={"Authorization": f"Bearer {member_token}"},
+    )
+
+    assert response.status_code == 200
+    texts = {card["text"] for card in response.json()}
+    assert texts == {"Facilitator's card", "Member's card"}
+
+
+def test_list_all_cards_includes_cards_from_multiple_different_authors(client):
+    # Contrasts with #9's /mine, which is scoped to a single author -- this
+    # test proves the all-cards response is not filtered that way.
+    project_id, facilitator_token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, facilitator_token)
+
+    member_token = _signup_and_login(client, "member@example.com")
+    _add_member(client, project_id, "member@example.com", "team_member")
+
+    with client.session_local() as db:
+        facilitator_user = db.query(User).filter(User.email == "facilitator@example.com").first()
+        member_user = db.query(User).filter(User.email == "member@example.com").first()
+        facilitator_id = facilitator_user.id
+        member_id = member_user.id
+
+    client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "From facilitator"},
+        headers={"Authorization": f"Bearer {facilitator_token}"},
+    )
+    client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "stop", "text": "From member"},
+        headers={"Authorization": f"Bearer {member_token}"},
+    )
+
+    _set_cycle_status(client, cycle_id, "revealed")
+
+    response = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        headers={"Authorization": f"Bearer {facilitator_token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    author_ids = {card["author_id"] for card in body}
+    assert author_ids == {facilitator_id, member_id}
+
+
+def test_list_all_cards_works_for_closed_cycle_too(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "A card"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    _set_cycle_status(client, cycle_id, "closed")
+
+    response = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+
+
+def test_list_all_cards_facilitator_cannot_see_author_of_anonymous_card_but_can_see_non_anonymous_author(client):
+    # This is the key behavioral requirement: reveal must not leak the
+    # author of an anonymous card, even to the facilitator who triggered
+    # the reveal. Proven end-to-end through the HTTP response, not just at
+    # the serializer level.
+    project_id, facilitator_token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, facilitator_token)
+
+    member_token = _signup_and_login(client, "member@example.com")
+    _add_member(client, project_id, "member@example.com", "team_member")
+
+    with client.session_local() as db:
+        member_user = db.query(User).filter(User.email == "member@example.com").first()
+        member_id = member_user.id
+
+    client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Anonymous card", "is_anonymous": True},
+        headers={"Authorization": f"Bearer {member_token}"},
+    )
+    client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "stop", "text": "Non-anonymous card", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {member_token}"},
+    )
+
+    _set_cycle_status(client, cycle_id, "revealed")
+
+    response = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        headers={"Authorization": f"Bearer {facilitator_token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 2
+
+    anonymous_card = next(card for card in body if card["text"] == "Anonymous card")
+    non_anonymous_card = next(card for card in body if card["text"] == "Non-anonymous card")
+
+    assert anonymous_card["is_anonymous"] is True
+    assert "author_id" not in anonymous_card
+
+    assert non_anonymous_card["is_anonymous"] is False
+    assert non_anonymous_card["author_id"] == member_id
+
+
+def test_list_all_cards_for_open_cycle_is_409(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Still open"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    response = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409
+
+
+def test_list_all_cards_with_nonexistent_cycle_id_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+
+    response = client.get(
+        f"/projects/{project_id}/cycles/999999/cards",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_list_all_cards_with_cycle_id_from_a_different_project_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+    _set_cycle_status(client, cycle_id, "revealed")
+
+    other_project_id, other_token = _make_project_with_membership(client, "other@example.com", "facilitator")
+
+    response = client.get(
+        f"/projects/{other_project_id}/cycles/{cycle_id}/cards",
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_list_all_cards_without_token_is_401(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+    _set_cycle_status(client, cycle_id, "revealed")
+
+    response = client.get(f"/projects/{project_id}/cycles/{cycle_id}/cards")
+
+    assert response.status_code == 401
+
+
+def test_list_all_cards_with_no_membership_is_403_not_500(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+    _set_cycle_status(client, cycle_id, "revealed")
+    outsider_token = _signup_and_login(client, "outsider@example.com")
+
+    response = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        headers={"Authorization": f"Bearer {outsider_token}"},
+    )
+
+    assert response.status_code == 403
+
+
 def test_serialize_feedback_card_hides_author_even_when_called_as_if_by_a_facilitator():
     # The serializer takes no caller/role argument -- the anonymity rule is
     # unconditional, with no facilitator exception. This test documents

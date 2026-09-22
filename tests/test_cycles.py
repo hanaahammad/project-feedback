@@ -6,7 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.db import Base, get_db
 from app.main import app
-from app.models import Project, ProjectMembership, Role, User
+from app.models import FeedbackCycle, Project, ProjectMembership, Role, User
 
 
 @pytest.fixture
@@ -142,6 +142,189 @@ def test_cycle_status_can_be_read_back_after_creation(client):
     assert body["id"] == cycle_id
     assert body["project_id"] == project_id
     assert body["status"] == "open"
+
+
+# ---------------------------------------------------------------------------
+# POST /projects/{project_id}/cycles/{cycle_id}/reveal
+# ---------------------------------------------------------------------------
+
+
+def test_facilitator_can_reveal_open_cycle_and_response_has_id_project_id_status(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = client.post(
+        f"/projects/{project_id}/cycles",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()["id"]
+
+    response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/reveal",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == cycle_id
+    assert body["project_id"] == project_id
+    assert body["status"] == "revealed"
+
+
+def test_reveal_persists_and_is_reflected_on_subsequent_get(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = client.post(
+        f"/projects/{project_id}/cycles",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()["id"]
+
+    client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/reveal",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    get_response = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert get_response.status_code == 200
+    assert get_response.json()["status"] == "revealed"
+
+
+def test_reveal_an_already_revealed_cycle_is_409_and_status_unchanged(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = client.post(
+        f"/projects/{project_id}/cycles",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()["id"]
+
+    first = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/reveal",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/reveal",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert second.status_code == 409
+
+    get_response = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert get_response.json()["status"] == "revealed"
+
+
+def test_reveal_a_closed_cycle_is_409_and_status_unchanged(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = client.post(
+        f"/projects/{project_id}/cycles",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()["id"]
+
+    with client.session_local() as db:
+        cycle = db.query(FeedbackCycle).filter(FeedbackCycle.id == cycle_id).first()
+        cycle.status = "closed"
+        db.commit()
+
+    response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/reveal",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409
+
+    get_response = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert get_response.json()["status"] == "closed"
+
+
+def test_reveal_rejects_team_member_with_403(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = client.post(
+        f"/projects/{project_id}/cycles",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()["id"]
+
+    member_token = _signup_and_login(client, "member@example.com")
+    with client.session_local() as db:
+        user = db.query(User).filter(User.email == "member@example.com").first()
+        role = db.query(Role).filter(Role.name == "team_member").first()
+        db.add(ProjectMembership(user_id=user.id, project_id=project_id, role_id=role.id))
+        db.commit()
+
+    response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/reveal",
+        headers={"Authorization": f"Bearer {member_token}"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_reveal_without_token_is_401(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = client.post(
+        f"/projects/{project_id}/cycles",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()["id"]
+
+    response = client.post(f"/projects/{project_id}/cycles/{cycle_id}/reveal")
+
+    assert response.status_code == 401
+
+
+def test_reveal_with_no_membership_is_403_not_500(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = client.post(
+        f"/projects/{project_id}/cycles",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()["id"]
+
+    outsider_token = _signup_and_login(client, "outsider@example.com")
+
+    response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/reveal",
+        headers={"Authorization": f"Bearer {outsider_token}"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_reveal_with_nonexistent_cycle_id_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+
+    response = client.post(
+        f"/projects/{project_id}/cycles/999999/reveal",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_reveal_with_cycle_id_from_a_different_project_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = client.post(
+        f"/projects/{project_id}/cycles",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()["id"]
+
+    other_project_id, other_token = _make_project_with_membership(client, "other@example.com", "facilitator")
+
+    response = client.post(
+        f"/projects/{other_project_id}/cycles/{cycle_id}/reveal",
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+
+    assert response.status_code == 404
+
+    get_response = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert get_response.json()["status"] == "open"
 
 
 # ---------------------------------------------------------------------------

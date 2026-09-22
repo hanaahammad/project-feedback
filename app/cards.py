@@ -127,6 +127,39 @@ def list_my_cards(
     return [serialize_feedback_card(card) for card in cards]
 
 
+@router.get(
+    "/{project_id}/cycles/{cycle_id}/cards",
+    response_model=list[dict],
+)
+def list_all_cards(
+    project_id: int,
+    cycle_id: int,
+    current_user: User = Depends(require_project_member),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    cycle = (
+        db.query(FeedbackCycle)
+        .filter(FeedbackCycle.id == cycle_id, FeedbackCycle.project_id == project_id)
+        .first()
+    )
+    if cycle is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cycle not found")
+
+    if cycle.status == CycleStatus.OPEN:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cards are not visible until the cycle has been revealed",
+        )
+
+    # Unlike /mine, no author_id filter here -- every card in the cycle is
+    # returned regardless of who submitted it. Each card is still routed
+    # through the shared serializer, so an anonymous card's author stays
+    # hidden even from a facilitator viewing this response.
+    cards = db.query(FeedbackCard).filter(FeedbackCard.cycle_id == cycle_id).all()
+
+    return [serialize_feedback_card(card) for card in cards]
+
+
 @router.put(
     "/{project_id}/cycles/{cycle_id}/cards/{card_id}",
     response_model=dict,
