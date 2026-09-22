@@ -276,13 +276,39 @@ Constraints:
 - Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 12. Automatic clustering suggestions
-Goal: Pre-group revealed cards into suggested clusters using AI.
-Description: When a cycle is revealed, call an AI service to propose an initial clustering of the cards and populate the clustering board with these suggestions. The output must be fully editable using the manual clustering controls — this task only adds the suggestion step, not any locking behavior. Requires an AI/LLM provider to be configured; treat the specific provider and credentials as a config/environment concern, not something this task needs to design.
-Depends on: #11 (Manual clustering board)
+Goal: A project member can trigger an AI-generated clustering suggestion for a revealed cycle's still-ungrouped cards via a separate, optional endpoint -- never as part of #10's reveal action -- and the result is a set of ordinary #11 clusters, indistinguishable from and fully editable through #11's existing manual controls; a failed or unavailable AI call never produces an error and never blocks the board from loading.
 Acceptance Criteria:
-- On reveal, an AI-suggested clustering is generated and populates the board
-- Suggested clusters can be edited with the same controls built in task 11
-- If the AI call fails, the board still loads (cards ungrouped) instead of erroring
+- [ ] A project member can trigger clustering suggestions on a revealed cycle (`POST /projects/{project_id}/cycles/{cycle_id}/suggest-clusters`); when the injectable AI-calling function returns a set of card groupings, the endpoint creates one new `Cluster` row per group (via the same creation path as #11's create-cluster endpoint), sets each returned card's `cluster_id` to its new cluster's `id`, and responds `200` with `{"status": "applied", "clusters": [...]}` where each entry has `id`, `cycle_id`, and `name`
+- [ ] A fresh `GET /projects/{project_id}/cycles/{cycle_id}/cards` (#10's all-cards endpoint) after a successful suggestion reflects the assigned `cluster_id` for each grouped card, and a fresh `GET /projects/{project_id}/cycles/{cycle_id}/clusters` (#11) lists the newly created clusters -- suggestions persist through #11's existing read endpoints; no new read/board endpoint is added by this task
+- [ ] When the injectable AI-calling function raises (simulating a failed or timed-out AI provider call), the endpoint catches the exception, creates no `Cluster` rows, leaves every card's `cluster_id` unchanged, and still responds `200` (never 4xx/5xx) with `{"status": "unavailable", "clusters": []}`
+- [ ] A test stubs/monkeypatches the AI-calling function to return a fixed grouping and asserts the "applied" behavior above, with no real network call and no API key/credential present
+- [ ] A test stubs/monkeypatches the AI-calling function to raise and asserts the "unavailable" behavior above, again with no real network call
+- [ ] Only cards with `cluster_id is null` at call time are passed to, or eligible to be grouped by, the suggestion function; a card that already has a `cluster_id` (from a prior manual assignment or a prior suggestion run) is left untouched by a subsequent call
+- [ ] A test proves a suggested cluster is an ordinary cluster: it can be renamed via #11's `PATCH .../clusters/{cluster_id}`, and a card can be reassigned out of it (including back to `null`) via #11's `PATCH .../cards/{card_id}/cluster`, with no special-casing or rejection
+- [ ] A test proves #10's reveal action (`POST .../reveal`) succeeds with no AI-related environment variable or provider configured at all -- reveal never calls the AI-calling function and its behavior is unchanged from #10
+- [ ] Calling suggest-clusters on a cycle whose `status` is `open` or `closed` is rejected with `409`, and no clusters are created and no card's `cluster_id` changes
+- [ ] Calling suggest-clusters on a `cycle_id` that does not exist, or that belongs to a different `project_id` than the one in the path, is rejected with `404`
+- [ ] Calling suggest-clusters without a valid auth token is rejected with `401`
+- [ ] Calling suggest-clusters from an authenticated user with no `ProjectMembership` on that project at all is rejected with `403`, not `500`
+- [ ] `uv run pytest` passes, including the new tests
+Out of scope:
+- Which AI/LLM provider to call, prompt design, and API key/credential management -- treated as a config/environment concern; no follow-up filed since nothing later in docs/tasks.md's plan calls for choosing a provider, and the injectable function in Constraints is the extension point a future provider gets wired in behind
+- Automatically re-running suggestions when new cards appear in a cycle -- moot, since #10 already blocks card submission after reveal, so a revealed cycle's card set is fixed before suggest-clusters is ever callable
+- Any indication in the API of which clusters were AI-suggested vs manually created (no `origin`/`source` field) -- the goal is that a suggestion is indistinguishable from, and as fully editable as, an ordinary #11 cluster; no follow-up filed since nothing in docs/plan.md calls for surfacing this distinction
+- A background job / async task queue for the AI call -- this project has no job infrastructure (no Celery/queue), and nothing in the backlog before #19 needs one; the call stays synchronous within this task's own endpoint request. No follow-up filed since nothing calls for one yet
+- Automatically invoking suggest-clusters as part of #10's reveal action -- see Constraints for why this must stay a separate, optional endpoint
+- A frontend UI for triggering or viewing suggestions -- consistent with #4-#11, no template/static layer exists in the project and nothing later in the plan calls for one, so no follow-up filed
+Constraints:
+- Depends on #11 (Manual clustering board) being merged: this task reuses #11's cluster-creation persistence and #11's `GET .../clusters` plus #10's `GET .../cards` read endpoints to expose the board state -- no new read/board endpoint is added
+- Implement this as a separate, optional endpoint (`POST /projects/{project_id}/cycles/{cycle_id}/suggest-clusters`) rather than folding the AI call into #10's reveal action. Reveal must stay fast and must succeed or fail purely on its own existing rules regardless of an AI provider's availability or latency -- "if the AI call fails, the board still loads instead of erroring" is only meaningful if an AI failure can never propagate to the action that makes the board exist in the first place. This project also has no background-job infrastructure (no Celery/queue) that would make an async-during-reveal alternative safe, so a synchronous-but-decoupled endpoint is the option that avoids both blocking reveal and requiring new infra
+- Use `require_project_member` (not `require_role("facilitator")`) for the new route, consistent with #11's Constraints that clustering is open to any project member, not facilitator-only
+- The endpoint must check `cycle.status == CycleStatus.REVEALED` and reject with `409` otherwise (both `open` and `closed` rejected), mirroring #10/#11's gating pattern
+- The AI call must go through a single, mockable function (e.g. `app/ai_clustering.py`'s `generate_cluster_suggestions(cards) -> list[SuggestedGroup]`) that the endpoint calls and catches all exceptions from -- tests must monkeypatch/stub this function so no test makes a real network call or needs a real API key/credential in CI
+- No AI/LLM SDK dependency is added to `pyproject.toml` in this task -- the interface is provider-agnostic; wiring a real provider behind it is a future concern per Out of scope
+- Only cards with `cluster_id is null` at call time are passed to / eligible to be grouped by the suggestion function; already-clustered cards are left untouched
+- New clusters created by this endpoint use the same `Cluster` row shape as #11's create-cluster endpoint (`cycle_id`, optional `name`) so they are ordinary, fully-editable clusters with no special marker field
+- Add the new route to `app/clusters.py` (from #11), following the same Pydantic request/response, `Depends(get_db)`, `Depends(require_project_member)`, `HTTPException(status_code=..., detail=...)` pattern as #11's routes
+- Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`, stubbing/monkeypatching the AI function as described above
 
 ## 13. Voting on discussion topics
 Goal: Let each team member distribute 3 votes across clusters.
