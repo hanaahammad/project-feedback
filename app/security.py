@@ -6,7 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import AuthToken, User
+from app.models import AuthToken, ProjectMembership, User
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -35,3 +35,32 @@ def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
     return auth_token.user
+
+
+def require_role(role_name: str):
+    """Build a FastAPI dependency that requires the current user to hold `role_name`
+    on the project identified by the `project_id` path parameter.
+
+    Depends on `get_current_user`, so a missing/invalid token still yields 401
+    before any role check runs.
+    """
+
+    def dependency(
+        project_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> User:
+        membership = (
+            db.query(ProjectMembership)
+            .filter(
+                ProjectMembership.user_id == current_user.id,
+                ProjectMembership.project_id == project_id,
+            )
+            .first()
+        )
+        if membership is None or membership.role.name != role_name:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+
+        return current_user
+
+    return dependency
