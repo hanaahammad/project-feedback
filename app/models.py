@@ -44,6 +44,9 @@ class User(Base):
     memberships: Mapped[list["ProjectMembership"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     cards: Mapped[list["FeedbackCard"]] = relationship(back_populates="author")
     votes: Mapped[list["Vote"]] = relationship(back_populates="participant")
+    notes: Mapped[list["DiscussionNote"]] = relationship(back_populates="author")
+    authored_decisions: Mapped[list["Decision"]] = relationship(back_populates="author")
+    owned_action_items: Mapped[list["ActionItem"]] = relationship(back_populates="owner")
 
 
 class AuthToken(Base):
@@ -164,10 +167,12 @@ class DiscussionNote(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"))
+    author_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     cluster: Mapped["Cluster"] = relationship(back_populates="notes")
+    author: Mapped["User"] = relationship(back_populates="notes")
 
 
 class Decision(Base):
@@ -176,12 +181,14 @@ class Decision(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     cycle_id: Mapped[int] = mapped_column(ForeignKey("feedback_cycles.id"))
     cluster_id: Mapped[int | None] = mapped_column(ForeignKey("clusters.id"))
+    author_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     description: Mapped[str] = mapped_column(Text)
     confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     cycle: Mapped["FeedbackCycle"] = relationship(back_populates="decisions")
     cluster: Mapped["Cluster | None"] = relationship(back_populates="decisions")
+    author: Mapped["User"] = relationship(back_populates="authored_decisions")
 
 
 class ActionItem(Base):
@@ -190,6 +197,7 @@ class ActionItem(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     cycle_id: Mapped[int] = mapped_column(ForeignKey("feedback_cycles.id"))
     cluster_id: Mapped[int | None] = mapped_column(ForeignKey("clusters.id"))
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     description: Mapped[str] = mapped_column(Text)
     due_date: Mapped[date | None] = mapped_column(Date)
     status: Mapped[ActionStatus] = mapped_column(Enum(ActionStatus), default=ActionStatus.OPEN)
@@ -198,3 +206,4 @@ class ActionItem(Base):
 
     cycle: Mapped["FeedbackCycle"] = relationship(back_populates="action_items")
     cluster: Mapped["Cluster | None"] = relationship(back_populates="action_items")
+    owner: Mapped["User"] = relationship(back_populates="owned_action_items")

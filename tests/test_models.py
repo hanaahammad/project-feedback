@@ -60,14 +60,20 @@ def test_entities_persist_with_relationships(session):
         is_anonymous=True,
     )
     vote = Vote(cluster_id=cluster.id, participant_id=author.id)
-    note = DiscussionNote(cluster_id=cluster.id, text="Team agrees this is a priority")
-    decision = Decision(cycle_id=cycle.id, cluster_id=cluster.id, description="Adopt weekly summaries")
+    note = DiscussionNote(cluster_id=cluster.id, text="Team agrees this is a priority", author_id=author.id)
+    decision = Decision(
+        cycle_id=cycle.id,
+        cluster_id=cluster.id,
+        description="Adopt weekly summaries",
+        author_id=author.id,
+    )
     action_item = ActionItem(
         cycle_id=cycle.id,
         cluster_id=cluster.id,
         description="Draft summary template",
         due_date=date(2026, 1, 15),
         status=ActionStatus.OPEN,
+        owner_id=author.id,
     )
     session.add_all([card, vote, note, decision, action_item])
     session.commit()

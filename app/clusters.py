@@ -1,10 +1,24 @@
+from datetime import date, datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from app.ai_clustering import generate_cluster_suggestions
 from app.db import get_db
-from app.models import Cluster, CycleStatus, DiscussionStatus, FeedbackCard, FeedbackCycle, User
+from app.models import (
+    ActionItem,
+    ActionStatus,
+    Cluster,
+    CycleStatus,
+    Decision,
+    DiscussionNote,
+    DiscussionStatus,
+    FeedbackCard,
+    FeedbackCycle,
+    ProjectMembership,
+    User,
+)
 from app.security import require_project_member, require_role
 
 router = APIRouter(prefix="/projects", tags=["clusters"])
@@ -67,6 +81,76 @@ class DiscussionStatusResponse(BaseModel):
     status: DiscussionStatus
 
 
+class DiscussionNoteCreateRequest(BaseModel):
+    text: str
+
+    @field_validator("text")
+    @classmethod
+    def text_must_not_be_blank(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("text must not be empty or whitespace")
+        return value
+
+
+class DiscussionNoteResponse(BaseModel):
+    id: int
+    cycle_id: int
+    cluster_id: int
+    text: str
+    author_id: int
+    created_at: datetime
+
+
+class DecisionCreateRequest(BaseModel):
+    description: str
+
+    @field_validator("description")
+    @classmethod
+    def description_must_not_be_blank(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("description must not be empty or whitespace")
+        return value
+
+
+class DecisionResponse(BaseModel):
+    id: int
+    cycle_id: int
+    cluster_id: int | None
+    description: str
+    author_id: int
+    confirmed: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ActionItemCreateRequest(BaseModel):
+    description: str
+    due_date: date | None = None
+    owner_id: int | None = None
+
+    @field_validator("description")
+    @classmethod
+    def description_must_not_be_blank(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("description must not be empty or whitespace")
+        return value
+
+
+class ActionItemResponse(BaseModel):
+    id: int
+    cycle_id: int
+    cluster_id: int | None
+    description: str
+    due_date: date | None
+    status: ActionStatus
+    owner_id: int
+    confirmed: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 def _get_cycle(db: Session, project_id: int, cycle_id: int) -> FeedbackCycle:
     cycle = (
         db.query(FeedbackCycle)
@@ -87,6 +171,24 @@ def _get_cluster(db: Session, cycle_id: int, cluster_id: int) -> Cluster:
     if cluster is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cluster not found")
     return cluster
+
+
+def _validate_project_member(db: Session, project_id: int, user_id: int) -> None:
+    """Raise 404 unless `user_id` names an existing `ProjectMembership` on
+    `project_id` -- mirrors the "does not exist, or belongs to a different
+    X" 404 convention used elsewhere (#11/#13/#15) for an owner_id supplied
+    on action-item creation.
+    """
+    membership = (
+        db.query(ProjectMembership)
+        .filter(
+            ProjectMembership.user_id == user_id,
+            ProjectMembership.project_id == project_id,
+        )
+        .first()
+    )
+    if membership is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
 
 
 @router.post(
@@ -314,3 +416,241 @@ def suggest_clusters(
         db.refresh(cluster)
 
     return {"status": "applied", "clusters": created_clusters}
+
+
+# ---------------------------------------------------------------------------
+# Live manual discussion capture (#16): notes, decisions, action items.
+#
+# All three follow the same shape: create requires cycle.status ==
+# REVEALED (409 otherwise), list requires cycle.status != OPEN (409 on
+# open, 200 on revealed/closed), and both require an existing cluster_id
+# scoped to this cycle_id (404 otherwise, via _get_cluster). No
+# "current topic" state is read or written anywhere below -- cluster_id is
+# taken solely from the URL on every call (see #16's Constraints).
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/{project_id}/cycles/{cycle_id}/clusters/{cluster_id}/notes",
+    response_model=DiscussionNoteResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_discussion_note(
+    project_id: int,
+    cycle_id: int,
+    cluster_id: int,
+    payload: DiscussionNoteCreateRequest,
+    current_user: User = Depends(require_project_member),
+    db: Session = Depends(get_db),
+) -> dict:
+    cycle = _get_cycle(db, project_id, cycle_id)
+    _get_cluster(db, cycle_id, cluster_id)
+
+    if cycle.status != CycleStatus.REVEALED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Notes can only be created on a revealed cycle",
+        )
+
+    note = DiscussionNote(cluster_id=cluster_id, text=payload.text, author_id=current_user.id)
+    db.add(note)
+    db.commit()
+    db.refresh(note)
+
+    # DiscussionNote has no cycle_id column of its own (only cluster_id) --
+    # the response's cycle_id comes from the already-validated path
+    # parameter rather than from the ORM object.
+    return {
+        "id": note.id,
+        "cycle_id": cycle_id,
+        "cluster_id": note.cluster_id,
+        "text": note.text,
+        "author_id": note.author_id,
+        "created_at": note.created_at,
+    }
+
+
+@router.get(
+    "/{project_id}/cycles/{cycle_id}/clusters/{cluster_id}/notes",
+    response_model=list[DiscussionNoteResponse],
+)
+def list_discussion_notes(
+    project_id: int,
+    cycle_id: int,
+    cluster_id: int,
+    current_user: User = Depends(require_project_member),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    cycle = _get_cycle(db, project_id, cycle_id)
+    _get_cluster(db, cycle_id, cluster_id)
+
+    if cycle.status == CycleStatus.OPEN:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Notes are not visible until the cycle has been revealed",
+        )
+
+    notes = (
+        db.query(DiscussionNote)
+        .filter(DiscussionNote.cluster_id == cluster_id)
+        .order_by(DiscussionNote.created_at.asc())
+        .all()
+    )
+
+    return [
+        {
+            "id": note.id,
+            "cycle_id": cycle_id,
+            "cluster_id": note.cluster_id,
+            "text": note.text,
+            "author_id": note.author_id,
+            "created_at": note.created_at,
+        }
+        for note in notes
+    ]
+
+
+@router.post(
+    "/{project_id}/cycles/{cycle_id}/clusters/{cluster_id}/decisions",
+    response_model=DecisionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_decision(
+    project_id: int,
+    cycle_id: int,
+    cluster_id: int,
+    payload: DecisionCreateRequest,
+    current_user: User = Depends(require_project_member),
+    db: Session = Depends(get_db),
+) -> Decision:
+    cycle = _get_cycle(db, project_id, cycle_id)
+    _get_cluster(db, cycle_id, cluster_id)
+
+    if cycle.status != CycleStatus.REVEALED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Decisions can only be created on a revealed cycle",
+        )
+
+    # confirmed is always True here -- never read from the request body.
+    # This is manual, live entry by someone in the meeting; it needs no
+    # separate approval step, unlike #20/#21's future AI-draft path which
+    # must create unconfirmed rows in this same table.
+    decision = Decision(
+        cycle_id=cycle_id,
+        cluster_id=cluster_id,
+        description=payload.description,
+        author_id=current_user.id,
+        confirmed=True,
+    )
+    db.add(decision)
+    db.commit()
+    db.refresh(decision)
+    return decision
+
+
+@router.get(
+    "/{project_id}/cycles/{cycle_id}/clusters/{cluster_id}/decisions",
+    response_model=list[DecisionResponse],
+)
+def list_decisions(
+    project_id: int,
+    cycle_id: int,
+    cluster_id: int,
+    current_user: User = Depends(require_project_member),
+    db: Session = Depends(get_db),
+) -> list[Decision]:
+    cycle = _get_cycle(db, project_id, cycle_id)
+    _get_cluster(db, cycle_id, cluster_id)
+
+    if cycle.status == CycleStatus.OPEN:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Decisions are not visible until the cycle has been revealed",
+        )
+
+    return (
+        db.query(Decision)
+        .filter(Decision.cluster_id == cluster_id)
+        .order_by(Decision.created_at.asc())
+        .all()
+    )
+
+
+@router.post(
+    "/{project_id}/cycles/{cycle_id}/clusters/{cluster_id}/action-items",
+    response_model=ActionItemResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_action_item(
+    project_id: int,
+    cycle_id: int,
+    cluster_id: int,
+    payload: ActionItemCreateRequest,
+    current_user: User = Depends(require_project_member),
+    db: Session = Depends(get_db),
+) -> ActionItem:
+    cycle = _get_cycle(db, project_id, cycle_id)
+    _get_cluster(db, cycle_id, cluster_id)
+
+    if cycle.status != CycleStatus.REVEALED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Action items can only be created on a revealed cycle",
+        )
+
+    # owner_id defaults to the requester (already known to be a project
+    # member, via require_project_member, so no lookup is needed for the
+    # default case). An explicit owner_id is validated as a real
+    # ProjectMembership on this project -- 404 otherwise -- since the
+    # recorder and the owner are not necessarily the same person in a
+    # live meeting (e.g. "Bob will do X").
+    if payload.owner_id is not None:
+        _validate_project_member(db, project_id, payload.owner_id)
+        owner_id = payload.owner_id
+    else:
+        owner_id = current_user.id
+
+    # status is never accepted from the request body -- a newly created
+    # action item always starts "open"; changing it afterward is #17's job.
+    action_item = ActionItem(
+        cycle_id=cycle_id,
+        cluster_id=cluster_id,
+        description=payload.description,
+        due_date=payload.due_date,
+        status=ActionStatus.OPEN,
+        owner_id=owner_id,
+        confirmed=True,
+    )
+    db.add(action_item)
+    db.commit()
+    db.refresh(action_item)
+    return action_item
+
+
+@router.get(
+    "/{project_id}/cycles/{cycle_id}/clusters/{cluster_id}/action-items",
+    response_model=list[ActionItemResponse],
+)
+def list_action_items(
+    project_id: int,
+    cycle_id: int,
+    cluster_id: int,
+    current_user: User = Depends(require_project_member),
+    db: Session = Depends(get_db),
+) -> list[ActionItem]:
+    cycle = _get_cycle(db, project_id, cycle_id)
+    _get_cluster(db, cycle_id, cluster_id)
+
+    if cycle.status == CycleStatus.OPEN:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Action items are not visible until the cycle has been revealed",
+        )
+
+    return (
+        db.query(ActionItem)
+        .filter(ActionItem.cluster_id == cluster_id)
+        .order_by(ActionItem.created_at.asc())
+        .all()
+    )
