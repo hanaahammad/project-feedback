@@ -55,14 +55,28 @@ Constraints:
 - Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py` (`Base.metadata.create_all` on a `StaticPool` `sqlite:///:memory:` engine, `app.dependency_overrides[get_db]`)
 
 ## 5. Create and view a project
-Goal: Let a user create a project and see its page.
-Description: Build the flow to create a project (name, description, start/end dates) and a project page that currently shows just this static info. Creating a project also makes the creator a member of it with the Facilitator role — the plan treats the creator as the usual facilitator, and without this no one could ever pass #6's "only a facilitator can create a cycle" check. This becomes the landing page other features will add sections to later.
-Depends on: #2 (Core data model), #3 (User authentication), #4 (Configurable roles and permissions)
+Goal: A logged-in user can create a project (a required `name`, plus optional `description`, `start_date`, `end_date`) and view it afterward on its own page, with the creator automatically recorded as the project's Facilitator so later facilitator-only actions (like #6's cycle creation) have someone able to pass that check.
 Acceptance Criteria:
-- A logged-in user can create a project with name, description, start date, and end date
-- Creating a project also creates a `ProjectMembership` for the creator with the Facilitator role
-- The created project is viewable on its own project page
-- Submitting without a required field (e.g. name) is rejected with a clear error
+- [ ] A logged-in user can create a project (e.g. `POST /projects`) by submitting `name` (required) plus optional `description`, `start_date`, and `end_date`; the response includes the new project's id and the submitted fields
+- [ ] A request to create a project with no `name`, or a `name` that is empty or only whitespace, is rejected with a 422 response and no project row is created
+- [ ] A request to create a project without a valid auth token is rejected with 401, matching the existing behavior of other protected routes (e.g. `GET /auth/me`)
+- [ ] Creating a project also records the creator as a Facilitator member of that project -- no separate action is needed for the creator to hold that role
+- [ ] A created project can be retrieved afterward by its id (e.g. `GET /projects/{id}`) and shows the same `name`, `description`, `start_date`, and `end_date` that were submitted
+- [ ] Requesting a project id that does not exist returns 404
+- [ ] Viewing a project does not require the requester to be a member of it -- any authenticated user can view any project by id (see Out of scope for why this isn't restricted further)
+- [ ] `uv run pytest` passes, including new tests covering the cases above
+Out of scope:
+- Editing or deleting an existing project, and listing/browsing all projects a user belongs to -- none of docs/tasks.md's later tasks call for editing, deleting, or listing projects, so no follow-up issue is filed for it
+- Validating that `end_date` is not before `start_date`, or any other cross-field date validation -- nothing in the plan depends on this, so no follow-up issue is filed for it
+- Restricting project visibility to only its members (vs. any authenticated user) -- it's card- and cycle-level access that #7 and #9 actually gate on membership; the plan never requires a project itself to be hidden from a logged-in non-member, so no follow-up issue is filed for it
+- Adding team members beyond the creator -- that's #6's job
+- The role/membership schema and the permission-checking dependency themselves -- that's #4's job; this task only needs to call into whatever #4 lands as to record the creator's Facilitator membership
+Constraints:
+- `Project` already exists in `app/models.py` (from #2) with `name`, `description`, `start_date`, `end_date` -- no new migration is needed for the project table itself
+- Depends on #4 being merged: recording the creator's Facilitator membership must use whatever role/membership mechanism #4 lands as -- implement against #4's actual merged code, not a re-derived or parallel mechanism
+- New route(s) belong in a new `app/projects.py` router, included from `app/main.py` the same way `app/auth.py`'s router is
+- Follow the existing FastAPI/Pydantic pattern in `app/auth.py`: Pydantic request/response models, `response_model=...`, `Depends(get_db)`, `Depends(get_current_user)`, `HTTPException(status_code=..., detail=...)`
+- Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 6. Create a feedback cycle and invite the team
 Goal: Let a facilitator start a weekly feedback cycle and add members to the project.
