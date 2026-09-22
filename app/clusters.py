@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
+from app.ai_clustering import generate_cluster_suggestions
 from app.db import get_db
 from app.models import Cluster, CycleStatus, FeedbackCard, FeedbackCycle, User
 from app.security import require_project_member
@@ -30,6 +31,11 @@ class ClusterResponse(BaseModel):
     name: str | None
 
     model_config = {"from_attributes": True}
+
+
+class SuggestClustersResponse(BaseModel):
+    status: str
+    clusters: list[ClusterResponse]
 
 
 def _get_cycle(db: Session, project_id: int, cycle_id: int) -> FeedbackCycle:
@@ -174,3 +180,80 @@ def merge_clusters(
     db.commit()
     db.refresh(target)
     return target
+
+
+@router.post(
+    "/{project_id}/cycles/{cycle_id}/suggest-clusters",
+    response_model=SuggestClustersResponse,
+)
+def suggest_clusters(
+    project_id: int,
+    cycle_id: int,
+    current_user: User = Depends(require_project_member),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Trigger an AI-generated clustering suggestion for a revealed cycle's
+    still-ungrouped cards.
+
+    This is a separate, optional endpoint from #10's reveal action by
+    design (see #12's Constraints): reveal must stay fast and succeed or
+    fail purely on its own rules, regardless of an AI provider's
+    availability or latency, so the AI call is never made from there.
+
+    A suggestion is applied by creating ordinary #11 `Cluster` rows (the
+    same shape #11's create-cluster endpoint uses) and reassigning each
+    grouped card's `cluster_id` -- no new read/board endpoint is added;
+    the result is visible through #11's `GET .../clusters` and #10's
+    `GET .../cards` exactly like a manually created cluster.
+    """
+    cycle = _get_cycle(db, project_id, cycle_id)
+
+    if cycle.status != CycleStatus.REVEALED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cluster suggestions can only be generated on a revealed cycle",
+        )
+
+    # Only cards with cluster_id is null at call time are eligible -- a
+    # card already assigned (manually, or by a prior suggestion run) is
+    # never passed to the AI function and is never touched below.
+    ungrouped_cards = (
+        db.query(FeedbackCard)
+        .filter(FeedbackCard.cycle_id == cycle_id, FeedbackCard.cluster_id.is_(None))
+        .all()
+    )
+
+    try:
+        groups = generate_cluster_suggestions(ungrouped_cards)
+    except Exception:
+        # A failed/timed-out/unconfigured AI call is never an error to the
+        # caller: no Cluster rows are created, no card's cluster_id
+        # changes (nothing has been written yet), and the board still
+        # loads via #10/#11's existing read endpoints.
+        return {"status": "unavailable", "clusters": []}
+
+    eligible_card_ids = {card.id for card in ungrouped_cards}
+    created_clusters: list[Cluster] = []
+
+    for group in groups:
+        cluster = Cluster(cycle_id=cycle_id, name=group.name)
+        db.add(cluster)
+        db.flush()  # assign cluster.id without committing yet
+
+        for card_id in group.card_ids:
+            # Defensively ignore any id the AI function returns that
+            # wasn't actually one of the ungrouped cards handed to it --
+            # an already-clustered or unknown card is never reassigned.
+            if card_id not in eligible_card_ids:
+                continue
+            card = next((c for c in ungrouped_cards if c.id == card_id), None)
+            if card is not None:
+                card.cluster_id = cluster.id
+
+        created_clusters.append(cluster)
+
+    db.commit()
+    for cluster in created_clusters:
+        db.refresh(cluster)
+
+    return {"status": "applied", "clusters": created_clusters}
