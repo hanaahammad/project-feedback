@@ -473,6 +473,456 @@ def test_serialize_feedback_card_includes_author_id_for_non_anonymous_card():
     assert result["is_anonymous"] is False
 
 
+def _add_member(client: TestClient, project_id: int, email: str, role_name: str) -> None:
+    with client.session_local() as db:
+        user = db.query(User).filter(User.email == email).first()
+        role = db.query(Role).filter(Role.name == role_name).first()
+        db.add(ProjectMembership(user_id=user.id, project_id=project_id, role_id=role.id))
+        db.commit()
+
+
+# ---------------------------------------------------------------------------
+# GET /projects/{project_id}/cycles/{cycle_id}/cards/mine
+# ---------------------------------------------------------------------------
+
+
+def test_list_mine_returns_only_current_users_cards_with_full_serializer_fields(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "My own card", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 201
+
+    mine_response = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/mine",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert mine_response.status_code == 200
+    body = mine_response.json()
+    assert len(body) == 1
+    assert body[0]["text"] == "My own card"
+    assert body[0]["category"] == "start"
+    assert body[0]["is_anonymous"] is False
+
+
+def test_list_mine_includes_own_anonymous_card_with_text_and_category_intact(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "stop", "text": "My anonymous card", "is_anonymous": True},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    mine_response = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/mine",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert mine_response.status_code == 200
+    body = mine_response.json()
+    assert len(body) == 1
+    assert body[0]["text"] == "My anonymous card"
+    assert body[0]["category"] == "stop"
+    assert body[0]["is_anonymous"] is True
+
+
+def test_list_mine_never_contains_another_users_cards_in_either_direction(client):
+    project_id, facilitator_token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, facilitator_token)
+
+    member_token = _signup_and_login(client, "member@example.com")
+    _add_member(client, project_id, "member@example.com", "team_member")
+
+    client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "User A's card"},
+        headers={"Authorization": f"Bearer {facilitator_token}"},
+    )
+    client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "stop", "text": "User B's card"},
+        headers={"Authorization": f"Bearer {member_token}"},
+    )
+
+    a_mine = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/mine",
+        headers={"Authorization": f"Bearer {facilitator_token}"},
+    ).json()
+    b_mine = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/mine",
+        headers={"Authorization": f"Bearer {member_token}"},
+    ).json()
+
+    assert [card["text"] for card in a_mine] == ["User A's card"]
+    assert [card["text"] for card in b_mine] == ["User B's card"]
+    assert "User B's card" not in [card["text"] for card in a_mine]
+    assert "User A's card" not in [card["text"] for card in b_mine]
+
+
+def test_list_mine_is_empty_for_facilitator_with_no_cards_before_reveal(client):
+    project_id, facilitator_token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, facilitator_token)
+
+    member_token = _signup_and_login(client, "member@example.com")
+    _add_member(client, project_id, "member@example.com", "team_member")
+
+    client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "continue", "text": "Team member's card"},
+        headers={"Authorization": f"Bearer {member_token}"},
+    )
+
+    facilitator_mine = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/mine",
+        headers={"Authorization": f"Bearer {facilitator_token}"},
+    )
+
+    assert facilitator_mine.status_code == 200
+    assert facilitator_mine.json() == []
+
+
+def test_list_mine_with_nonexistent_cycle_id_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+
+    response = client.get(
+        f"/projects/{project_id}/cycles/999999/cards/mine",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_list_mine_with_cycle_id_from_a_different_project_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    other_project_id, other_token = _make_project_with_membership(client, "other@example.com", "facilitator")
+
+    response = client.get(
+        f"/projects/{other_project_id}/cycles/{cycle_id}/cards/mine",
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_list_mine_without_token_is_401(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    response = client.get(f"/projects/{project_id}/cycles/{cycle_id}/cards/mine")
+
+    assert response.status_code == 401
+
+
+def test_list_mine_with_no_membership_is_403_not_500(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+    outsider_token = _signup_and_login(client, "outsider@example.com")
+
+    response = client.get(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/mine",
+        headers={"Authorization": f"Bearer {outsider_token}"},
+    )
+
+    assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# PUT /projects/{project_id}/cycles/{cycle_id}/cards/{card_id}
+# ---------------------------------------------------------------------------
+
+
+def test_edit_own_card_succeeds_and_response_reflects_updated_values(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    create_response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Original text", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    card_id = create_response.json()["id"]
+
+    response = client.put(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/{card_id}",
+        json={"category": "stop", "text": "Updated text", "is_anonymous": True},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["category"] == "stop"
+    assert body["text"] == "Updated text"
+    assert body["is_anonymous"] is True
+    assert "author_id" not in body
+
+    with client.session_local() as db:
+        card = db.query(FeedbackCard).filter(FeedbackCard.id == card_id).first()
+        assert card.category == CardCategory.STOP
+        assert card.text == "Updated text"
+        assert card.is_anonymous is True
+
+
+def test_edit_someone_elses_card_is_404_not_403(client):
+    project_id, facilitator_token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, facilitator_token)
+
+    member_token = _signup_and_login(client, "member@example.com")
+    _add_member(client, project_id, "member@example.com", "team_member")
+
+    create_response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Member's card"},
+        headers={"Authorization": f"Bearer {member_token}"},
+    )
+    card_id = create_response.json()["id"]
+
+    # Facilitator tries to edit the team member's card.
+    response = client.put(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/{card_id}",
+        json={"category": "stop", "text": "Hijacked", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {facilitator_token}"},
+    )
+
+    assert response.status_code == 404
+
+    with client.session_local() as db:
+        card = db.query(FeedbackCard).filter(FeedbackCard.id == card_id).first()
+        assert card.text == "Member's card"
+        assert card.category == CardCategory.START
+
+
+def test_edit_card_in_revealed_cycle_is_409_and_leaves_fields_unchanged(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    create_response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Original text"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    card_id = create_response.json()["id"]
+    _set_cycle_status(client, cycle_id, "revealed")
+
+    response = client.put(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/{card_id}",
+        json={"category": "stop", "text": "Too late", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409
+
+    with client.session_local() as db:
+        card = db.query(FeedbackCard).filter(FeedbackCard.id == card_id).first()
+        assert card.text == "Original text"
+        assert card.category == CardCategory.START
+
+
+def test_edit_card_in_closed_cycle_is_409_and_leaves_fields_unchanged(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    create_response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Original text"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    card_id = create_response.json()["id"]
+    _set_cycle_status(client, cycle_id, "closed")
+
+    response = client.put(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/{card_id}",
+        json={"category": "stop", "text": "Too late", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409
+
+    with client.session_local() as db:
+        card = db.query(FeedbackCard).filter(FeedbackCard.id == card_id).first()
+        assert card.text == "Original text"
+        assert card.category == CardCategory.START
+
+
+def test_edit_card_with_invalid_category_is_422_and_leaves_fields_unchanged(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    create_response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Original text"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    card_id = create_response.json()["id"]
+
+    response = client.put(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/{card_id}",
+        json={"category": "sideways", "text": "Should not apply", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 422
+
+    with client.session_local() as db:
+        card = db.query(FeedbackCard).filter(FeedbackCard.id == card_id).first()
+        assert card.text == "Original text"
+        assert card.category == CardCategory.START
+
+
+def test_edit_card_with_blank_text_is_422_and_leaves_fields_unchanged(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    create_response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Original text"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    card_id = create_response.json()["id"]
+
+    response = client.put(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/{card_id}",
+        json={"category": "start", "text": "   ", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 422
+
+    with client.session_local() as db:
+        card = db.query(FeedbackCard).filter(FeedbackCard.id == card_id).first()
+        assert card.text == "Original text"
+
+
+def test_edit_card_missing_is_anonymous_field_is_422(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    create_response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Original text"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    card_id = create_response.json()["id"]
+
+    response = client.put(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/{card_id}",
+        json={"category": "start", "text": "Missing is_anonymous"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_edit_nonexistent_card_id_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    response = client.put(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/999999",
+        json={"category": "start", "text": "No such card", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_edit_card_id_belonging_to_a_different_cycle_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+    other_cycle_id = _create_cycle(client, project_id, token)
+
+    create_response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Original text"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    card_id = create_response.json()["id"]
+
+    response = client.put(
+        f"/projects/{project_id}/cycles/{other_cycle_id}/cards/{card_id}",
+        json={"category": "stop", "text": "Wrong cycle", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+
+    with client.session_local() as db:
+        card = db.query(FeedbackCard).filter(FeedbackCard.id == card_id).first()
+        assert card.text == "Original text"
+
+
+def test_edit_card_id_belonging_to_a_different_project_is_404(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    create_response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Original text"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    card_id = create_response.json()["id"]
+
+    other_project_id, other_token = _make_project_with_membership(client, "other@example.com", "facilitator")
+    other_cycle_id = _create_cycle(client, other_project_id, other_token)
+
+    response = client.put(
+        f"/projects/{other_project_id}/cycles/{other_cycle_id}/cards/{card_id}",
+        json={"category": "stop", "text": "Wrong project", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_edit_card_without_token_is_401(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    create_response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Original text"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    card_id = create_response.json()["id"]
+
+    response = client.put(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/{card_id}",
+        json={"category": "stop", "text": "No auth", "is_anonymous": False},
+    )
+
+    assert response.status_code == 401
+
+
+def test_edit_card_with_no_membership_is_403_not_500(client):
+    project_id, token = _make_project_with_membership(client, "facilitator@example.com", "facilitator")
+    cycle_id = _create_cycle(client, project_id, token)
+
+    create_response = client.post(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards",
+        json={"category": "start", "text": "Original text"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    card_id = create_response.json()["id"]
+
+    outsider_token = _signup_and_login(client, "outsider@example.com")
+
+    response = client.put(
+        f"/projects/{project_id}/cycles/{cycle_id}/cards/{card_id}",
+        json={"category": "stop", "text": "Not a member", "is_anonymous": False},
+        headers={"Authorization": f"Bearer {outsider_token}"},
+    )
+
+    assert response.status_code == 403
+
+
 def test_serialize_feedback_card_hides_author_even_when_called_as_if_by_a_facilitator():
     # The serializer takes no caller/role argument -- the anonymity rule is
     # unconditional, with no facilitator exception. This test documents
