@@ -79,14 +79,34 @@ Constraints:
 - Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 6. Create a feedback cycle and invite the team
-Goal: Let a facilitator start a weekly feedback cycle and add members to the project.
-Description: On a project, allow a facilitator to open a new feedback cycle, and add other users to the project as Team Members (creating a `ProjectMembership` per #4 for anyone not already a member). Membership lives on the project, not the cycle, so it carries over automatically to future cycles. The cycle should have an open/closed state that later tasks can check.
-Depends on: #2 (Core data model), #4 (Configurable roles and permissions), #5 (Create and view a project)
+Goal: A facilitator can open a new feedback cycle on a project and add other existing users to the project as Team Members, so the cycle has participants before feedback submission begins.
 Acceptance Criteria:
-- A facilitator can open a new feedback cycle on a project
-- The facilitator can add users to the project as Team Members
-- The cycle exposes an open/closed state
-- A non-facilitator cannot create a cycle
+- [ ] A facilitator can open a new feedback cycle on a project (e.g. `POST /projects/{project_id}/cycles`); the response includes the new cycle's `id`, `project_id`, and `status`
+- [ ] A newly created cycle's `status` is `open` by default -- no separate request is needed to put it in the open state
+- [ ] A cycle's `status` can be read back after creation (e.g. via `GET /projects/{project_id}/cycles/{cycle_id}`), not just returned once in the creation response
+- [ ] A request to create a cycle from a user who holds only the `team_member` role on that project is rejected with `403`, via the existing `require_role("facilitator")` dependency
+- [ ] A request to create a cycle without a valid auth token is rejected with `401`
+- [ ] A request to create a cycle from a user who is authenticated but has no `ProjectMembership` on that project at all is rejected with `403`, not `500`
+- [ ] A facilitator can add another existing user to the project as a Team Member (e.g. `POST /projects/{project_id}/members` identifying the user by `email`); this creates a `ProjectMembership` row referencing the existing seeded `team_member` `Role` row -- no new `Role` row is created
+- [ ] Adding a user who already has a `ProjectMembership` on that project (as either role) is rejected with `409`, and no duplicate `ProjectMembership` row is created
+- [ ] Adding a user by an `email` with no matching `User` account is rejected with `404`
+- [ ] A request to add a member from a user who holds only the `team_member` role on that project is rejected with `403`
+- [ ] A request to add a member without a valid auth token is rejected with `401`
+- [ ] `uv run pytest` passes, including new tests covering the cases above
+Out of scope:
+- Closing a cycle, revealing it, or any other status transition off of `open` -- moving a cycle to `revealed` is #10's job; nothing in this task exercises `CycleStatus.REVEALED` or `CycleStatus.CLOSED`, and no task in the current backlog is yet assigned ownership of the `open` to `closed` transition -- worth a follow-up issue when that gap is picked up, not filed here since it's outside this task's mandate
+- Listing all members of a project, and removing or changing a member's role once added -- no task in docs/tasks.md's plan calls for this, so no follow-up issue is filed for it
+- A user adding themselves to a project (self-service join) -- only a facilitator adding someone else is in scope here
+- Feedback card submission itself -- that's #7's job, which depends on this task for a cycle and members to exist
+- Creating the `team_member` role, the `ProjectMembership` table, or the permission-checking dependency -- that's #4's job, already merged; this task only looks up and reuses what #4 landed as
+Constraints:
+- `FeedbackCycle`, `Role`, and `ProjectMembership` already exist in `app/models.py` (from #2 and #4) -- no new migration is needed for this task
+- Depends on #4 being merged: use the existing `require_role("facilitator")` dependency from `app/security.py` for both new routes rather than a re-derived permission check
+- Depends on #5 being merged: a `Project` must already exist (via `POST /projects`) before a cycle can be opened on it
+- New route(s) belong in a new `app/cycles.py` router (or extend `app/projects.py` -- implementer's choice, matching the existing router-per-resource pattern), included from `app/main.py` the same way `app/auth.py`'s router is
+- Follow the existing FastAPI/Pydantic pattern in `app/auth.py` and `app/projects.py`: Pydantic request/response models, `response_model=...`, `Depends(get_db)`, `Depends(require_role("facilitator"))`, `HTTPException(status_code=..., detail=...)`
+- Look up the `team_member` `Role` row by name at request time (the same way `app/projects.py` already looks up `facilitator` when recording a project's creator) -- don't hardcode a role id
+- Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 7. Feedback submission form (Start / Stop / Continue)
 Goal: Let a team member submit feedback cards for an open cycle.
