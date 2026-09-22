@@ -162,13 +162,38 @@ Constraints:
 - Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 9. Private view of own feedback before reveal
-Goal: Let a member see and edit only their own cards before the reveal.
-Description: Build the pre-reveal view of the feedback form/list that shows a user their own submitted cards (editable) and gives no visibility into anyone else's submissions. Enforce this on the backend, not just by hiding UI elements.
-Depends on: #7 (Feedback submission form)
+Goal: A member of a project can list only their own submitted feedback cards for a cycle, and can edit one of their own cards' category, text, and anonymity flag while that cycle is still open, using #8's shared card-serializer for every response; no other member's cards -- including from the facilitator -- are ever visible or editable through these endpoints.
 Acceptance Criteria:
-- Before reveal, a member's view lists only their own cards and allows editing them
-- A backend request for another member's pre-reveal cards is rejected, not just hidden in the UI
-- The check holds even when the requesting user is the facilitator
+- [ ] A member can list their own cards in a cycle (e.g. `GET /projects/{project_id}/cycles/{cycle_id}/cards/mine`); the response is a list of cards produced by #8's shared serializer (e.g. `serialize_feedback_card`), containing only cards where `author_id` equals the requesting user's id
+- [ ] The filtering to "only my cards" happens at the query level (`WHERE author_id = current_user.id`), not by fetching every card in the cycle and hiding fields after the fact -- another member's card is never present in the response body at all, in any cycle status (`open`, `revealed`, `closed`)
+- [ ] A test proves that a user's own anonymous card (`is_anonymous: true`) appears in their own "list mine" response with its `text` and `category` intact -- #8's serializer only omits author-identifying fields, it does not hide the card itself from its own author
+- [ ] A test proves that when user A and user B both belong to the same project and cycle and have each submitted cards, user B's "list mine" response contains none of user A's cards, and user A's contains none of user B's -- not "anonymized", but entirely absent
+- [ ] A test proves the same isolation holds when the requester is the facilitator: a facilitator who has submitted no cards of their own gets an empty list from "list mine" before reveal, never a team member's cards
+- [ ] Listing own cards for a `cycle_id` that does not exist, or that belongs to a different `project_id` than the one in the path, returns `404` (matching #7's existing pattern for cycle lookups)
+- [ ] A member can edit one of their own cards while its cycle's `status` is `open` (e.g. `PUT /projects/{project_id}/cycles/{cycle_id}/cards/{card_id}`), submitting `category`, `text`, and `is_anonymous` -- all three required on every request, no partial update -- and the `200` response reflects the updated values via #8's serializer
+- [ ] Editing a card owned by a different user returns `404`, not `403` -- consistent with this task's "no visibility into anyone else's submissions" goal, the response must not confirm that a card with that id exists and belongs to someone else; this holds even when the requester is the facilitator
+- [ ] Editing a card whose cycle `status` is `revealed` or `closed` is rejected with `409`, and the card's fields are left unchanged
+- [ ] Editing a card with a `category` outside `start`/`stop`/`continue`, or with blank/whitespace-only `text`, is rejected with `422`, and the card's fields are left unchanged
+- [ ] Editing a `card_id` that does not exist at all returns `404`
+- [ ] Editing a `card_id` that exists but belongs to a different `cycle_id`/`project_id` than the path returns `404`
+- [ ] Both endpoints reject a request without a valid auth token with `401`
+- [ ] Both endpoints reject a request from an authenticated user with no `ProjectMembership` on that project at all with `403`, not `500`
+- [ ] `uv run pytest` passes, including the new tests
+Out of scope:
+- Viewing or editing a card that isn't the requester's own, including a facilitator's access to team members' pre-reveal cards -- there is no view for that in this task; a facilitator (or team member) seeing every card together only exists after reveal, which is #10's job
+- Listing/viewing all cards in a cycle after reveal (any card, any author) -- that's #10's job, which depends on this task
+- Deleting a submitted card -- nothing in docs/tasks.md's plan calls for card deletion anywhere, so no follow-up issue is filed for it
+- Partial-field updates on edit (e.g. changing only `text` without resubmitting `category` and `is_anonymous`) -- this task's edit endpoint requires all three fields on every request, specifically to avoid silently resetting `is_anonymous` to a default via an omitted field on an already-anonymous card; nothing else in the plan needs a partial-update endpoint, so no follow-up issue is filed for it
+- Any UI/frontend for viewing or editing cards -- consistent with #4-#8, no template/static layer exists in the project and nothing later in the plan calls for one, so no follow-up issue is filed for it
+- Cluster assignment or any clustering-related display in this view -- that's #11's job; cards returned here keep whatever `cluster_id` #7 gave them (`null`), unchanged by this task
+Constraints:
+- Depends on #7 (Feedback submission form) being merged: `FeedbackCard`, the `require_project_member` dependency, and the existing `app/cards.py` request/response patterns already exist and must be reused, not re-derived
+- Depends on #8 (Anonymous submission handling) being merged: both new endpoints must call #8's shared card-serialization helper (e.g. `serialize_feedback_card`) for every response body -- no separate/ad-hoc logic that re-derives which fields to hide for an anonymous card. This task cannot start until #8 lands, since the serializer it must use does not exist yet
+- Add both new routes to the existing `app/cards.py` router, following the existing FastAPI/Pydantic pattern in `app/auth.py`, `app/projects.py`, and #7/#8's `app/cards.py`: Pydantic request/response models, `response_model=...`, `Depends(get_db)`, `Depends(require_project_member)`, `HTTPException(status_code=..., detail=...)`
+- Use `require_project_member` (not `require_role`) for both routes -- both `team_member` and `facilitator` must be able to view/edit their own cards, and neither role gets special access to another member's cards
+- Use the `/cards/mine` sub-path (not the bare `/cards` collection) for the list endpoint, so it doesn't collide with the all-cards listing #10 will likely add at `GET /projects/{project_id}/cycles/{cycle_id}/cards`
+- No new migration is needed -- `FeedbackCard.category`, `.text`, `.is_anonymous`, and `.author_id` all already exist (from #2, #7, #8)
+- Add tests under `tests/`, following the `TestClient` + in-memory-SQLite pattern already used in `tests/test_auth.py`
 
 ## 10. Facilitator reveal action
 Goal: Let the facilitator make all submitted cards visible to the team at once.
