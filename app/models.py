@@ -32,6 +32,20 @@ class DiscussionStatus(str, enum.Enum):
     DEFERRED = "deferred"
 
 
+class UploadKind(str, enum.Enum):
+    AUDIO = "audio"
+    VIDEO = "video"
+    TRANSCRIPT_FILE = "transcript_file"
+    TRANSCRIPT_TEXT = "transcript_text"
+
+
+class UploadStatus(str, enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -112,6 +126,7 @@ class FeedbackCycle(Base):
     clusters: Mapped[list["Cluster"]] = relationship(back_populates="cycle", cascade="all, delete-orphan")
     decisions: Mapped[list["Decision"]] = relationship(back_populates="cycle", cascade="all, delete-orphan")
     action_items: Mapped[list["ActionItem"]] = relationship(back_populates="cycle", cascade="all, delete-orphan")
+    uploads: Mapped[list["MeetingUpload"]] = relationship(back_populates="cycle", cascade="all, delete-orphan")
 
 
 class Cluster(Base):
@@ -207,3 +222,17 @@ class ActionItem(Base):
     cycle: Mapped["FeedbackCycle"] = relationship(back_populates="action_items")
     cluster: Mapped["Cluster | None"] = relationship(back_populates="action_items")
     owner: Mapped["User"] = relationship(back_populates="owned_action_items")
+
+
+class MeetingUpload(Base):
+    __tablename__ = "meeting_uploads"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("feedback_cycles.id"))
+    kind: Mapped[UploadKind] = mapped_column(Enum(UploadKind))
+    status: Mapped[UploadStatus] = mapped_column(Enum(UploadStatus), default=UploadStatus.PENDING)
+    transcript_text: Mapped[str | None] = mapped_column(Text)
+    file_path: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    cycle: Mapped["FeedbackCycle"] = relationship(back_populates="uploads")
