@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from app.action_items import router as action_items_router
 from app.auth import router as auth_router
 from app.cards import router as cards_router
 from app.clusters import router as clusters_router
@@ -16,6 +17,7 @@ app.include_router(cycles_router)
 app.include_router(cards_router)
 app.include_router(clusters_router)
 app.include_router(votes_router)
+app.include_router(action_items_router)
 
 
 @app.get("/")
