@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import CycleStatus, FeedbackCycle, MeetingUpload, UploadKind, UploadStatus, User
 from app.security import require_project_member, require_role
+from app.transcription import transcribe_audio
 
 router = APIRouter(prefix="/projects", tags=["uploads"])
 
@@ -37,6 +38,17 @@ def _get_cycle(db: Session, project_id: int, cycle_id: int) -> FeedbackCycle:
     if cycle is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cycle not found")
     return cycle
+
+
+def _get_upload(db: Session, cycle_id: int, upload_id: int) -> MeetingUpload:
+    upload = (
+        db.query(MeetingUpload)
+        .filter(MeetingUpload.id == upload_id, MeetingUpload.cycle_id == cycle_id)
+        .first()
+    )
+    if upload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")
+    return upload
 
 
 @router.post(
@@ -118,3 +130,47 @@ def list_uploads(
         .order_by(MeetingUpload.created_at.asc())
         .all()
     )
+
+
+@router.post(
+    "/{project_id}/cycles/{cycle_id}/uploads/{upload_id}/transcribe",
+    response_model=MeetingUploadResponse,
+)
+def transcribe_upload(
+    project_id: int,
+    cycle_id: int,
+    upload_id: int,
+    current_user: User = Depends(require_role("facilitator")),
+    db: Session = Depends(get_db),
+) -> MeetingUpload:
+    _get_cycle(db, project_id, cycle_id)
+    upload = _get_upload(db, cycle_id, upload_id)
+
+    if upload.kind not in {UploadKind.AUDIO, UploadKind.VIDEO}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Only audio/video uploads can be transcribed",
+        )
+
+    if upload.status != UploadStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Upload must be pending to be transcribed",
+        )
+
+    upload.status = UploadStatus.PROCESSING
+    db.commit()
+
+    try:
+        transcript_text = transcribe_audio(upload.file_path)
+    except Exception:
+        upload.status = UploadStatus.FAILED
+        db.commit()
+        db.refresh(upload)
+        return upload
+
+    upload.status = UploadStatus.COMPLETE
+    upload.transcript_text = transcript_text
+    db.commit()
+    db.refresh(upload)
+    return upload
