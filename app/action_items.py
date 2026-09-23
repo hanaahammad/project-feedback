@@ -17,7 +17,7 @@ class ActionItemListResponse(BaseModel):
     cluster_id: int | None
     cluster_name: str | None
     description: str
-    owner_id: int
+    owner_id: int | None
     due_date: date | None
     status: ActionStatus
     created_at: datetime
