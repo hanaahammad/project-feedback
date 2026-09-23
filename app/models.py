@@ -119,6 +119,7 @@ class FeedbackCycle(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"))
     status: Mapped[CycleStatus] = mapped_column(Enum(CycleStatus), default=CycleStatus.OPEN)
     voting_closed: Mapped[bool] = mapped_column(Boolean, default=False)
+    ai_summary: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     project: Mapped["Project"] = relationship(back_populates="cycles")
@@ -196,14 +197,14 @@ class Decision(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     cycle_id: Mapped[int] = mapped_column(ForeignKey("feedback_cycles.id"))
     cluster_id: Mapped[int | None] = mapped_column(ForeignKey("clusters.id"))
-    author_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    author_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     description: Mapped[str] = mapped_column(Text)
     confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     cycle: Mapped["FeedbackCycle"] = relationship(back_populates="decisions")
     cluster: Mapped["Cluster | None"] = relationship(back_populates="decisions")
-    author: Mapped["User"] = relationship(back_populates="authored_decisions")
+    author: Mapped["User | None"] = relationship(back_populates="authored_decisions")
 
 
 class ActionItem(Base):
@@ -212,7 +213,7 @@ class ActionItem(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     cycle_id: Mapped[int] = mapped_column(ForeignKey("feedback_cycles.id"))
     cluster_id: Mapped[int | None] = mapped_column(ForeignKey("clusters.id"))
-    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     description: Mapped[str] = mapped_column(Text)
     due_date: Mapped[date | None] = mapped_column(Date)
     status: Mapped[ActionStatus] = mapped_column(Enum(ActionStatus), default=ActionStatus.OPEN)
@@ -221,7 +222,7 @@ class ActionItem(Base):
 
     cycle: Mapped["FeedbackCycle"] = relationship(back_populates="action_items")
     cluster: Mapped["Cluster | None"] = relationship(back_populates="action_items")
-    owner: Mapped["User"] = relationship(back_populates="owned_action_items")
+    owner: Mapped["User | None"] = relationship(back_populates="owned_action_items")
 
 
 class MeetingUpload(Base):
