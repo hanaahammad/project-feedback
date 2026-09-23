@@ -5,6 +5,7 @@ from app.auth import router as auth_router
 from app.cards import router as cards_router
 from app.clusters import router as clusters_router
 from app.cycles import router as cycles_router
+from app.dashboard import router as dashboard_router
 from app.example_protected import router as example_protected_router
 from app.projects import router as projects_router
 from app.review import router as review_router
@@ -24,6 +25,7 @@ app.include_router(action_items_router)
 app.include_router(uploads_router)
 app.include_router(review_router)
 app.include_router(summary_router)
+app.include_router(dashboard_router)
 
 
 @app.get("/")
