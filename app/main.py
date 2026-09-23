@@ -8,6 +8,7 @@ from app.cycles import router as cycles_router
 from app.example_protected import router as example_protected_router
 from app.projects import router as projects_router
 from app.review import router as review_router
+from app.summary import router as summary_router
 from app.uploads import router as uploads_router
 from app.votes import router as votes_router
 
@@ -22,6 +23,7 @@ app.include_router(votes_router)
 app.include_router(action_items_router)
 app.include_router(uploads_router)
 app.include_router(review_router)
+app.include_router(summary_router)
 
 
 @app.get("/")
